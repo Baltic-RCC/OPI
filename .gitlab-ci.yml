@@ -14,7 +14,7 @@ sync-with-github:
       EOF
     # Perform synchronization
     - apk add --no-cache git
-    - git clone --bare https://github.com/Baltic-RCC/OPI.git
+    - git clone --bare https://github.com/Baltic-RCC/opi.git
     - cd opi.git
     - git config http.sslVerify false
     - git push --mirror https://$USERNAME:$ACCESS_TOKEN@$REPOSITORY_URL
