@@ -30,15 +30,17 @@ time_horizon = TIME_HORIZON
 timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
                                 time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
 opi_year = get_opi_year(timestamps)
-if RESULT_VERSION.lower() == 'latest':
-    version = set_task_version(timestamps=timestamps, time_horizon=TIME_HORIZON) - 1
-else:
-    version = int(RESULT_VERSION)
 
 timestamp_list = [ts.isoformat() for ts in timestamps]
 
 full_results = []
-for timestamp in timestamp_list:
+for ts, timestamp in zip(timestamps, timestamp_list):
+    # Latest version per timestamp, a rerun may cover only some timestamps
+    if RESULT_VERSION.lower() == 'latest':
+        version = set_task_version(timestamps=[ts], time_horizon=TIME_HORIZON) - 1
+    else:
+        version = int(RESULT_VERSION)
+    logger.info(f"Report {timestamp} ({time_horizon}): version {version}")
     result_list = []
     for index in index_list:
         if index in ["bus-results", "branch-results"]:

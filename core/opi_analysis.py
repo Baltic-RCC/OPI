@@ -130,7 +130,7 @@ class OutagePlanIncompatibilityAssessment:
 
         logger.info("Retrieving input data")
         if use_local_inputs:
-            inputs_path = Path(__file__).parent.parent.parent.joinpath(f'opi/inputs/{self.time_horizon}')
+            inputs_path = Path(__file__).resolve().parent.parent.joinpath(f'inputs/{self.time_horizon}')
             assessed_elements_path = inputs_path.joinpath("assessed_element_list.xlsx")
             contingencies_path = inputs_path.joinpath("contingency_list.xlsx")
             assessed_element_df = pd.read_excel(assessed_elements_path)

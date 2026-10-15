@@ -250,7 +250,9 @@ def assessed_elements_from_dataframe(data: str | pd.DataFrame) -> List[AssessedE
         assessed_elements = assessed_elements[assessed_elements.normal_enabled == True]
 
     # Build AssessedElement instances
-    converted_assessed_elements = [AssessedElement(**assessed_element) for assessed_element in assessed_elements.to_dict('records')]
+    # Blank cells (NaN) are dropped so model defaults apply
+    converted_assessed_elements = [AssessedElement(**{k: v for k, v in assessed_element.items() if pd.notna(v)})
+                                   for assessed_element in assessed_elements.to_dict('records')]
 
     return converted_assessed_elements
 
@@ -293,6 +295,7 @@ def contingencies_from_dataframe(data: str | pd.DataFrame) -> List[Contingency]:
                                                          'eq_eic': 'first'}).reset_index().to_dict('records')
 
     # Build Contingency instances
-    converted_contingencies = [Contingency(**contingency) for contingency in aggregated_dict]
+    converted_contingencies = [Contingency(**{k: v for k, v in contingency.items() if isinstance(v, list) or pd.notna(v)})
+                               for contingency in aggregated_dict]
 
     return converted_contingencies
