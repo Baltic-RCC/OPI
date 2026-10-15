@@ -7,13 +7,14 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-def query_elk_uap(index=ELK_UAP_INDEX, run_time_offset='P0D', time_horizon=None, filter_range=None):
-
-    logger.info(f"Retrieving outages from ELK index: '{ELK_UAP_INDEX}'")
+def query_elk_uap(time_horizon: str, run_time_offset: str, uap_query_offset: str,
+                  index: str = ELK_UAP_INDEX) -> pd.DataFrame | None:
+    """Latest UAP batch of the horizon in the query window, OUT and SSS rows; None when no batch is found."""
+    logger.info(f"Retrieving outages from ELK index: '{index}'")
 
     # now represents the time of the run, in P0W case it should be current time
     now = datetime.now() + isodate.parse_duration(run_time_offset)
-    filter_time = (now + isodate.parse_duration(filter_range)).strftime("%Y-%m-%dT%H:%M") + "Z"
+    filter_time = (now + isodate.parse_duration(uap_query_offset)).strftime("%Y-%m-%dT%H:%M") + "Z"
     now = now.strftime("%Y-%m-%dT%H:%M") + "Z"
 
     if time_horizon == 'WK':
@@ -33,34 +34,16 @@ def query_elk_uap(index=ELK_UAP_INDEX, run_time_offset='P0D', time_horizon=None,
         }
     }
     response = get_docs_by_query(index=index, query=query, size=10000, return_df=True)
-    result = pd.DataFrame()
 
-    if not response.empty:
+    if response.empty:
+        logger.warning(f"No UAP batch found in '{index}' for merge type {merge_type_list} between {filter_time} and {now}")
+        return None
 
-        # Get only latest report data
-        response['reportParsedDate'] = pd.to_datetime(response['reportParsedDate'])
-        response = response[response['reportParsedDate'] == response['reportParsedDate'].max()]
-        # Only keep latest outages
-        duplicated_outages = response[response.duplicated('eic', keep=False)]
-        latest_duplicate = duplicated_outages.groupby('eic')['date_of_last_change'].idxmax()
-        response = response.loc[response.index.isin(latest_duplicate) | ~response['eic'].duplicated(keep=False)]
+    # Get only latest report data
+    response['reportParsedDate'] = pd.to_datetime(response['reportParsedDate'])
+    response = response[response['reportParsedDate'] == response['reportParsedDate'].max()]
 
-        response = response[response['outage_type'].isin(['OUT'])]
-
-        response = response.sort_values(by=['eic', 'start_date', 'end_date']).reset_index(drop=True)
-        last_end_time = {}
-
-        # Remove outage duplicate if there is time overlap
-        for _, row in response.iterrows():
-            eic = row['eic']
-            start_time = row['start_date']
-            end_time = row['end_date']
-
-            if eic not in last_end_time or start_time > last_end_time[eic]:
-                result = pd.concat([result, pd.DataFrame([row])], ignore_index=True)
-                last_end_time[eic] = end_time
-
-    return result
+    return response[response['outage_type'].isin(['OUT', 'SSS'])]
 
 
 def send_opi_results_to_elk(results: dict, time_horizon: str, timestamp: str):
