@@ -42,6 +42,7 @@ for ts, timestamp in zip(timestamps, timestamp_list):
         version = int(RESULT_VERSION)
     logger.info(f"Report {timestamp} ({time_horizon}): version {version}")
     result_list = []
+    run_id = None
     for index in index_list:
         if index in ["bus-results", "branch-results"]:
             query = {"bool": {"filter": [
@@ -56,10 +57,20 @@ for ts, timestamp in zip(timestamps, timestamp_list):
                 {"match": {"@time_horizon": time_horizon}},
                 {"match": {"@version": version}},
             ]}}
+        if run_id:
+            query["bool"]["filter"].append({"match_phrase": {"@run_id": run_id}})
         elk_df = get_docs_by_query(index=f"opi-{index}*", query=query, size=10000)
         if elk_df.empty and index == 'system-balance':
             logger.warning(f"No results for {timestamp} ({time_horizon}, version {version}), not in report")
             break
+        if index == 'system-balance' and '@run_id' in elk_df.columns:
+            # Report one run: a version can hold several (version reused after a failed send, TASK_VERSION set by hand)
+            runs = elk_df.sort_values('@timestamp', kind='stable') if '@timestamp' in elk_df.columns else elk_df
+            run_id = runs['@run_id'].iloc[-1]
+            if elk_df['@run_id'].nunique() > 1:
+                logger.warning(f"{elk_df['@run_id'].nunique()} runs found for {timestamp} ({time_horizon}, "
+                               f"version {version}), using latest run {run_id}")
+            elk_df = elk_df[elk_df['@run_id'] == run_id].reset_index(drop=True)
         elk_df.drop(columns=list(ignore_columns), errors='ignore', inplace=True)
         if index != "violations":
             elk_df.drop(columns=list(ignore_columns2), errors='ignore', inplace=True)

@@ -67,9 +67,13 @@ def send_opi_results_to_elk(results: dict, time_horizon: str, timestamp: str):
     logger.info(f"Sending results to Elastic")
     response_list = []
 
-    for name, df in results.items():
+    # system-balance marks the timestamp as complete (report, task version): send it last, only if all others succeeded
+    for name, df in sorted(results.items(), key=lambda item: item[0] == 'system-balance'):
         df = df.fillna(0)
         if df.empty:
+            continue
+        if name == 'system-balance' and any(item is False for item in response_list):
+            logger.error("Not sending 'opi-system-balance' because other result indices failed")
             continue
         data = df.to_dict('records')
         logging.getLogger('brcc_apis.elk_api').disabled = True
