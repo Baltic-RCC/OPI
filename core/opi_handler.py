@@ -27,8 +27,8 @@ class HandlerRunOpi:
         self.name = 'opi_handler'
 
     def handle(self, task_object):
-        from opi.core.opi_worker import log_context
-        from opi.shared.process_results import get_opi_week_number
+        from opi.shared.logging_setup import log_context
+        from opi.shared.process_results import get_opi_week_number, get_result_opi_year
         from datetime import datetime
 
         task = task_object
@@ -42,7 +42,7 @@ class HandlerRunOpi:
             "@time_horizon": task['time_horizon'],
             "@scenario_timestamp": task['scenario_timestamp'],
             "@version": task['task_version'],
-            "opi_year": task['opi_year'],
+            "opi_year": get_result_opi_year(timestamp, task['time_horizon'], task['opi_year']),
             "opi_month": str(timestamp.month),
             "opi_week": get_opi_week_number(timestamp),
 
@@ -64,6 +64,7 @@ class HandlerRunOpi:
 
         # Perform OPI calculation
         opi_service.calculate_opi()
+        sa_diverged = opi_service.opi_results is None
         if opi_service.export_models:
             opi_service.export_model_to_minio(bucket=DATA_EXPORT_BUCKET, folder=OPI_MODEL_EXPORT_FOLDER)
         # After calculate_opi: adds to opi_results, also when security analysis diverged
@@ -76,9 +77,13 @@ class HandlerRunOpi:
             opi_service.update_result_metadata()
 
             if opi_service.send_to_elk is True:
-                opi_service.send_results_to_elk()
+                if not opi_service.send_results_to_elk():
+                    raise RuntimeError(f"Sending results to ELK failed, timestamp {task['scenario_timestamp']}")
 
             logger.info(f"{opi_service.scenario_timestamp} OPI calculation finished")
+
+        if sa_diverged:
+            raise RuntimeError(f"Security analysis diverged, no OPI results for timestamp {task['scenario_timestamp']}")
 
         return task_object
 

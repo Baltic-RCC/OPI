@@ -6,46 +6,25 @@ from opi.shared.opi_functions import get_opi_timestamps, get_input_dir, get_uap_
 from opi.shared.data_functions import set_task_version, set_outage_corrections
 from opi.shared.config_parser import parse_app_properties
 from opi.core.opi_handler import HandlerRunOpi
-from brcc_apis import elk_logger
-from contextvars import ContextVar
+from opi.shared.logging_setup import setup_logging, add_elk_handler
+import pypowsybl as pp
 
+setup_logging()
 parse_app_properties(caller_globals=globals(), path=config.paths.task_generator.task)
 parse_app_properties(caller_globals=globals(), path=config.paths.integrations.elastic)
-
-# Configure global logging metadata
-log_context = ContextVar("log_context", default={})
-old_factory = logging.getLogRecordFactory()
-
-def record_factory(*args, **kwargs):
-    record = old_factory(*args, **kwargs)
-    ctx = log_context.get()
-    if ctx:
-        for k, v in ctx.items():
-            record.__dict__[k] = v
-
-    return record
-
-logging.setLogRecordFactory(record_factory)
-
-# Setup logging
-root_logger = logging.getLogger()
-if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
-    ch = logging.StreamHandler(sys.stdout)
-    format = "%(levelname) -10s %(asctime) -20s %(name) -30s %(funcName) -35s %(lineno) -5d: %(message)s"
-    date_format = "%Y-%m-%d %H:%M:%S"
-    ch.setFormatter(logging.Formatter(fmt=format, datefmt=date_format))
-    root_logger.addHandler(ch)
-
-elk_log_handler = elk_logger.ElkLoggingHandler(elk_server=ELK_SERVER, index='opi-logs', api_key=ELK_API_KEY)
-if elk_log_handler.connected:
-    root_logger.addHandler(elk_log_handler)
+add_elk_handler(elk_server=ELK_SERVER, elk_api_key=ELK_API_KEY, index='opi-logs')
 
 logger = logging.getLogger(__name__)
+logger.info(f"pypowsybl {pp.__version__}")
 
 
 tasks = []
 timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
                                 time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
+if not timestamps:
+    logger.error(f"No OPI timestamps generated (TIME_HORIZON={TIME_HORIZON}, "
+                 f"SET_CRITICAL_TIMESTAMPS={SET_CRITICAL_TIMESTAMPS!r}), exiting worker")
+    sys.exit(1)
 
 opi_year = get_opi_year(timestamps)
 data_import_folder = get_input_dir(time_horizon=TIME_HORIZON)
@@ -76,14 +55,18 @@ for timestamp in timestamps:
     }
     tasks.append(task)
 
-if tasks:
-    for task in tasks:
-        try:
-            HandlerRunOpi().handle(task)
-        except Exception as e:
-            logger.error(e)
-            continue
-    raise SystemExit()
-else:
-    logger.info("No tasks generated at current timeframe, exiting worker.")
-    raise SystemError("OPI worker failed")
+logger.info(f"OPI run: {TIME_HORIZON}, version {task_version}, {len(tasks)} timestamp(s): "
+            f"{[task['scenario_timestamp'] for task in tasks]}")
+failed = []
+for number, task in enumerate(tasks, start=1):
+    logger.info(f"OPI task {number}/{len(tasks)} starting: {TIME_HORIZON} {task['scenario_timestamp']} v{task_version}")
+    try:
+        HandlerRunOpi().handle(task)
+    except Exception as e:
+        logger.exception(f"OPI task {number}/{len(tasks)} failed: {task['scenario_timestamp']}: {e}")
+        failed.append(task['scenario_timestamp'])
+
+logger.info(f"OPI run finished: {len(tasks) - len(failed)}/{len(tasks)} timestamp(s) succeeded"
+            + (f", failed: {failed}" if failed else ""))
+# Job fails only when no timestamp succeeded
+sys.exit(1 if len(failed) == len(tasks) else 0)
