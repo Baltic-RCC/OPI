@@ -415,6 +415,11 @@ def get_yr_model_timestamp(scenario_timestamp):
     return datetime.strftime(model_timestamp, "%Y-%m-%d")
 
 
+def _drop_nan(record: dict) -> dict:
+    """Remove keys with NaN values (blank Excel cells)."""
+    return {k: v for k, v in record.items() if not (isinstance(v, float) and v != v)}
+
+
 def assessed_elements_from_dataframe(data: str | pd.DataFrame) -> List[AssessedElement]:
     """
     Converts Assessed elements Excel or Dataframe file to assessed elements format for security analysis input
@@ -445,8 +450,8 @@ def assessed_elements_from_dataframe(data: str | pd.DataFrame) -> List[AssessedE
     if 'normal_enabled' in assessed_elements.columns:
         assessed_elements = assessed_elements[assessed_elements.normal_enabled == True]
 
-    # Build AssessedElement instances
-    converted_assessed_elements = [AssessedElement(**assessed_element) for assessed_element in assessed_elements.to_dict('records')]
+    # Build AssessedElement instances, blank cells fall back to model defaults
+    converted_assessed_elements = [AssessedElement(**_drop_nan(assessed_element)) for assessed_element in assessed_elements.to_dict('records')]
 
     return converted_assessed_elements
 
@@ -489,7 +494,7 @@ def contingencies_from_dataframe(data: str | pd.DataFrame) -> List[Contingency]:
                                                          'eq_eic': 'first'}).reset_index().to_dict('records')
 
     # Build Contingency instances
-    converted_contingencies = [Contingency(**contingency) for contingency in aggregated_dict]
+    converted_contingencies = [Contingency(**{'eq_eic': None, **_drop_nan(contingency)}) for contingency in aggregated_dict]
 
     return converted_contingencies
 

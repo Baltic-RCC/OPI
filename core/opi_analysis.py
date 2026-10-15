@@ -56,7 +56,7 @@ class OutagePlanIncompatibilityAssessment:
 
     def calculate_inertia(self) -> None:
         """Kinetic energy (Ek, MWs) of rated units per area: total fleet, scheduled in model, missing due to UAP outages."""
-        ratings_path = Path(__file__).resolve().parent.parent / "inputs" / "general" / "Inertia_ratings.xlsx"
+        ratings_path = Path(__file__).resolve().parent.parent / "inputs" / "general" / "inertia_ratings.xlsx"
         ratings = pd.concat(pd.read_excel(ratings_path, sheet_name=None).values(), ignore_index=True)
 
         units = pd.DataFrame({
@@ -200,6 +200,7 @@ class OutagePlanIncompatibilityAssessment:
                 Outage(**{k: v for k,v in row.items() if k in params}) for row in response.to_dict(orient="records")
             ]
         else:
+            logger.warning(f"No UAP outages found in '{index}' for merge type {merge_type_list} between {filter_time} and {now}")
             outage_list = None
 
         self.uap_outages = outage_list
@@ -270,7 +271,8 @@ class OutagePlanIncompatibilityAssessment:
                                                  assessed_elements=self.assessed_elements,
                                                  lf_parameters=self.lf_parameters, sa_parameters=self.sa_parameters,
                                                  debug=False)
-        self.security_service.present_igms = self.security_service.network.get_areas()['name'].to_list()
+        self.security_service.present_igms = [x.replace('Estonia', 'EE').replace("10YLV", "LV")
+                                              for x in self.security_service.network.get_areas()['name'].to_list()]
 
 
     def validate_base_case(self):
@@ -290,17 +292,18 @@ class OutagePlanIncompatibilityAssessment:
             self.model_is_valid = False
             logger.info(f"Network components: {islands}")
             logger.info(f"Model {str(self.model_meta['name'])} has separated islands")
+            return
 
         if 'PL' not in self.security_service.present_igms:
             logger.warning(f"Missing PSE model in {self.model_meta['name']}")
 
         # Perform base case security analysis
-        self.security_service.present_igms = [x.replace('Estonia', 'EE').replace("10YLV", "LV") for x in self.security_service.present_igms]
         if set(self._expected_areas).issubset(self.security_service.present_igms):
             self.security_service.run_security_analysis()
             if not self.security_service.results:
                 self.model_is_valid = False
                 logger.info(f"Model {self.model_meta['name']} missing results")
+                return
 
             base_case_violation = self.security_service.processed_limit_violations.query(
                 "contingency_id == '' and limit_type == 'CURRENT'")
@@ -338,6 +341,11 @@ class OutagePlanIncompatibilityAssessment:
         self.outages_to_reconnect = pd.concat([self.outages_to_reconnect, self.crosschecked_element_df[mask1]])
         mask2 = self.crosschecked_element_df[list(self.outage_corrections['to_disable'])].isin(self.outage_corrections['to_disable']).any(axis=1)
         self.confirmed_outages = pd.concat([self.confirmed_outages, self.crosschecked_element_df[mask2]])
+        # Manual corrections override UAP and model state
+        enabled = self.crosschecked_element_df.loc[mask1, 'equipment']
+        disabled = self.crosschecked_element_df.loc[mask2, 'equipment']
+        self.confirmed_outages = self.confirmed_outages[~self.confirmed_outages['equipment'].isin(enabled)]
+        self.outages_to_reconnect = self.outages_to_reconnect[~self.outages_to_reconnect['equipment'].isin(disabled)]
 
         # Clone initial network state and apply outage to run N-1
         self.security_service.network.clone_variant(src='InitialState', target=outage_configuration_id)

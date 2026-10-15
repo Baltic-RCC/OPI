@@ -26,15 +26,16 @@ time_horizon = TIME_HORIZON
 timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
                                 time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
 opi_year = get_opi_year(timestamps)
-if RESULT_VERSION.lower() == 'latest':
-    version = set_task_version(timestamps=timestamps, time_horizon=TIME_HORIZON) - 1
-else:
+if RESULT_VERSION.lower() != 'latest':
     version = int(RESULT_VERSION)
 
 timestamp_list = [ts.isoformat() for ts in timestamps]
 
 full_results = []
 for timestamp in timestamp_list:
+    # Latest version per timestamp, so a partial re-run does not hide the other timestamps
+    if RESULT_VERSION.lower() == 'latest':
+        version = set_task_version(timestamps=[pd.Timestamp(timestamp)], time_horizon=TIME_HORIZON) - 1
     result_list = []
     for index in index_list:
         if index in ["bus-results", "branch-results"]:

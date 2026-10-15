@@ -264,7 +264,7 @@ def opi_results_to_excel(results: tuple, time_horizon: str = '', year='', export
 
     # Add all the sheet timestamps
     for i, timestamp_results in enumerate(merged_results):
-        timestamp = pd.to_datetime(timestamp_results[1]['@scenario_timestamp']).iloc[1].strftime("%m-%d")
+        timestamp = pd.to_datetime(timestamp_results[0]['@scenario_timestamp']).iloc[0].strftime("%m-%d")
 
         if f"{timestamp} Base Case Data" not in workbook.sheetnames:
             logger.info(f"Creating result sheets for {timestamp}")
