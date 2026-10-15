@@ -1,51 +1,10 @@
 import logging
 import isodate
 import pandas as pd
-from io import BytesIO
-from opi import configs
-from pathlib import Path
-from opi.shared.integrations import download_models_from_minio, get_docs_by_query, minio_service, elastic_service
-from brcc_apis import elk_api
-from opi.shared.config_parser import parse_app_properties
+from opi.shared.integrations import get_docs_by_query, elastic_service, ELK_SERVER, ELK_API_KEY, ELK_UAP_INDEX
 from datetime import datetime
-from loadflow_engine.converters import assessed_elements_from_dataframe, contingencies_from_dataframe
 
-parse_app_properties(caller_globals=globals(), path=configs.paths.integrations.elastic)
-parse_app_properties(caller_globals=globals(), path=configs.paths.integrations.minio)
 logger = logging.getLogger(__name__)
-
-def get_opi_input_data(minio_bucket, minio_folder, time_horizon, use_local_inputs=True):
-
-    if use_local_inputs:
-        inputs_path = Path(__file__).parent.parent.joinpath(f'inputs/{time_horizon}')
-        assessed_elements_path = inputs_path.joinpath("assessed_element_list.xlsx")
-        contingencies_path = inputs_path.joinpath("contingency_list.xlsx")
-        assessed_element_df = pd.read_excel(assessed_elements_path)
-        contingency_df = pd.read_excel(contingencies_path)
-    else:
-        assessed_element_df = pd.read_excel(
-            BytesIO(minio_service.download_object(minio_bucket, f'{minio_folder}/assessed_element_list.xlsx')))
-        contingency_df = pd.read_excel(
-            BytesIO(minio_service.download_object(minio_bucket, f'{minio_folder}/contingency_list.xlsx')))
-
-    assessed_elements = assessed_elements_from_dataframe(data=assessed_element_df)
-    contingencies = contingencies_from_dataframe(data=contingency_df)
-
-    return {"assessed_elements": assessed_elements, "contingencies": contingencies, "assessed_elements_df": assessed_element_df}
-
-
-def get_models_from_minio(model_name_list: list, minio_bucket: str=OPI_MODEL_BUCKET, minio_folder: str=OPI_MODEL_FOLDER, get_locally=False):
-    if get_locally:
-        model_list = []
-        model_path = [str(Path(__file__).parent.parent.joinpath(f"inputs\models\{model}")) for model in model_name_list]
-        for model in model_path:
-            with open(model, "rb") as file:
-                file_data = file.read()
-            model_list.append(file_data)
-    else:
-        model_list = download_models_from_minio(minio_bucket, minio_folder, model_name_list)
-
-    return model_list
 
 
 def query_elk_uap(index=ELK_UAP_INDEX, run_time_offset='P0D', time_horizon=None, filter_range=None):
@@ -126,8 +85,7 @@ def send_opi_results_to_elk(results: dict, time_horizon: str, timestamp: str):
 
 def set_task_version(timestamps, time_horizon: str, set_version: str = None):
 
-    set_version = str(set_version or "").strip()
-    if set_version.upper() in ("", "LATEST"):
+    if set_version == "" or set_version == "LATEST" or set_version is None:
         timestamp_list = [ts.isoformat() for ts in timestamps]
         query = {"bool": {"must": [{"exists": {"field": "@version"}},
                                    {"terms": {"@scenario_timestamp": timestamp_list}},
@@ -184,11 +142,3 @@ def set_outage_corrections(outage_enable, outage_disable):
                 outage_corrections["to_disable"]["name"].append(outage)
 
     return outage_corrections
-
-
-if __name__ == "__main__":
-    from opi.shared.opi_functions import get_opi_1w_timestamps
-    df_name = ["confirmed-outages", "border-flows", "system-balance",  "opi-result-bus", "opi-result-branch", "opi-result-violations"]
-    critical_timestamps = get_opi_1w_timestamps('Now', timestamps_per_day=['09:30', ])
-    opi_models = get_models_from_minio(critical_timestamps)
-    print('')

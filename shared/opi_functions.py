@@ -1,117 +1,12 @@
 import calendar
-import uuid
 import logging
 import pandas as pd
 import isodate
-import opi.shared.sa_config as conf
-from datetime import datetime, timedelta, time, timezone
-from opi.shared.process_results import get_system_balance, get_ba_cross_border_flows
-from opi.shared.outage_crosscheck import run_outage_crosscheck
-from opi.shared.loadflow import load_network, replace_hvdc_reactive_generation
-from loadflow_engine.security_analysis import SecurityAnalysis
+from datetime import datetime, timedelta, time
 from opi.shared.utilities import AssessedElement, Contingency
 from typing import List
 
 logger = logging.getLogger(__name__)
-sa_config = conf.SecurityAnalysis(suspend_stdout=True)
-
-
-# TODO DEPRECATED
-def run_opi(network, contingencies, assessed_elements, timestamp_list: list, element_df: pd.DataFrame,
-            outages_df: pd.DataFrame = None, time_horizon=None):
-
-    pp_network = load_network(network, parameters=sa_config.cgmes_import)
-
-    # HVDC generator workaround
-    try:
-        pp_network = replace_hvdc_reactive_generation(pp_network, replace_nordbalt=True, replace_estlink1=True)
-    except Exception as e:
-        logger.error(f"HVDC workaround failed: {e}")
-
-    security_service = SecurityAnalysis(network=pp_network, contingencies=contingencies, assessed_elements=assessed_elements, debug=False)
-
-    total_results = []
-
-    for num, timestamp in enumerate(timestamp_list):
-        outage_configuration_id = str(uuid.uuid4())
-
-        crosschecked_element_df = run_outage_crosscheck(security_service.network, element_df, set_timestamp=timestamp, outages_df=outages_df)
-
-        crosschecked_element_df = crosschecked_element_df.rename(columns={'secured_for_region': 'area'})
-        confirmed_outages = crosschecked_element_df[crosschecked_element_df['outage_in_uap']]
-        existing_outages = crosschecked_element_df[crosschecked_element_df['outage_in_cgm']]
-
-        # Clone initial network state and apply outage to run N-1
-        security_service.network.clone_variant(src='InitialState', target=outage_configuration_id)
-        security_service.network.set_working_variant(outage_configuration_id)
-        logger.info(f"Network model working variant initialized and activated: {outage_configuration_id}")
-
-        changed_outage_list = []
-        # Reconnecting relevant outages
-        logger.info(f"Reconnecting outages to network instance: '{outage_configuration_id}'")
-        for outage in security_service.assessed_elements:
-            if outage.type != 'transformer':
-                try:
-                    if security_service.network.connect(outage.equipment):
-                        changed_outage_list.append(outage)
-                        logger.info(f" {outage.name} {outage.equipment} successfully reconnected")
-                    else:
-                        continue
-                except Exception as e:
-                    logger.error((e, outage.name))
-                    continue
-        logger.info(f"Done reconnected all assessed elements")
-
-        # Disconnect confirmed outages
-        logger.info(f"Applying outages to network instance: {outage_configuration_id}")
-        for index, outage in confirmed_outages.iterrows():
-            try:
-                if security_service.network.disconnect(outage['grid_element_id']):
-                    logger.info(f"Line {outage['name']} {outage['grid_element_id']} successfully disconnected")
-                else:
-                    if existing_outages['grid_element_id'].str.contains(outage['grid_element_id']).any():
-                        logger.info(f"Line {outage['name']} {outage['grid_element_id']} is already in outage")
-                    else:
-                        logger.error(f"Failed to disconnect line: {outage['name']} {outage['grid_element_id']}")
-            except Exception as e:
-                logger.error(e)
-                continue
-
-        # Run post outage scenario
-        security_service.run_security_analysis()
-
-        # Process OPI results
-        if not security_service.results:
-            logger.error(f"Model {str(timestamp)} did not finish calculation")
-            opi_results = None
-        else:
-            opi_result_bus = security_service.processed_bus_results
-            opi_result_branch = security_service.processed_branch_results
-            opi_result_violations = security_service.processed_limit_violations
-            opi_result_diverged_contingencies = pd.DataFrame([key for key, value in security_service.results.post_contingency_results.items() if value.status.name != 'CONVERGED'])
-
-            border_flows = get_ba_cross_border_flows(security_service).sort_values('Cross_border')
-            system_balance = get_system_balance(security_service, border_flows)
-            system_balance = system_balance[~system_balance['area'].str.contains('PL')]
-
-            # TODO fix output to fit existing structure
-            opi_results = [
-                timestamp,
-                confirmed_outages[['area', 'name', 'description']],
-                border_flows[['Cross_border', 'name', 'P_MW']],
-                opi_result_bus,
-                system_balance,
-                opi_result_branch,
-                opi_result_violations,
-                opi_result_diverged_contingencies
-            ]
-
-        total_results.append(opi_results)
-
-        security_service.network.set_working_variant('InitialState')
-        logger.info(f"Network model working variant reset to initial state ")
-
-    return total_results
 
 
 def calculate_critical_timestamps(uap_df, properties):
@@ -204,97 +99,6 @@ def parse_set_timestamps(timestamp_str: str, timestamps_per_day: list):
                     seen.add(timestamp)
 
     return [pd.Timestamp(dt) for dt in timestamps]
-
-#TODO Delete after refactoring
-def validate_base_case(opi_models, contingencies: list, assessed_elements: list):
-    valid_models = []
-    for num, model in enumerate(opi_models):
-        # Check model data type to define naming and other parameters
-        if dict == type(model):
-            network = model.get("DATA")
-            timestamp = model.get("@scenario_timestamp")
-            model_name = model['name'][:28]
-        else:
-            network = model
-            model_name = str(num+1)
-            timestamp = None
-        # Load model
-        logger.info(f"Validating model {num+1}/{len(opi_models)}: {model_name}")
-        start_time = datetime.now(timezone.utc)
-        pp_network = load_network(network, parameters=sa_config.cgmes_import)
-        security_service = SecurityAnalysis(network=pp_network, contingencies=contingencies, assessed_elements=assessed_elements, debug=False)
-        if not timestamp:
-            timestamp = str(security_service.network.case_date.isoformat())
-        logger.info(f"Network scenario timestamp: {timestamp}")
-        security_service.present_igms = ['EE' if tso == 'Estonia' else tso for tso in security_service.present_igms]
-
-        # Check if model is a single island
-        islands = security_service.network.get_buses().connected_component.value_counts().to_list()
-        if len(islands) > 1:
-            main_island = islands[0]
-            sub_islands = sum(islands[1:])
-            island_diff = sub_islands / main_island
-        else:
-            island_diff = 0
-        if island_diff > 0.15:
-            logger.info(f"Network components: {islands}")
-            logger.error(f"Model {str(model_name)} has separated islands, skipping validation")
-            continue
-
-        # TODO potentially move to configs, but not necessary yet
-        if 'PL' not in security_service.present_igms:
-            logger.warning("Missing PSE model")
-        if all(tso in security_service.present_igms for tso in ['LT', 'LV', 'EE']):
-            security_service.run_security_analysis()
-            if not security_service.results:
-                logger.error(f"Model {model_name} missing results, skipping validation")
-                continue
-            base_case_violation = security_service.processed_limit_violations.query("contingency_id == '' and limit_type == 'CURRENT'")
-
-            # Check for base case violations
-            if not base_case_violation.empty:
-                logger.error(f"Base case violations found in outage free model : {model_name}")
-            else:
-                if bytes == type(model):
-                    valid_models.append({"DATA": model, "@scenario_timestamp": timestamp})
-                else:
-                    valid_models.append(model)
-            end_time = datetime.now(timezone.utc)
-            logger.info(f"Validation {num+1}/{len(opi_models)} took {(end_time-start_time).total_seconds()} s")
-        else:
-            logger.error(f"Model {str(model_name)} missing TSO(s), skipping validation")
-
-    return valid_models
-
-# TODO DEPRECATED
-def generate_opi_runs(model_list: list, critical_timestamps: list, time_horizon: str):
-    runs = []
-    for model in model_list:
-        model_ts = model["@scenario_timestamp"]
-
-        # Defined month seasonality of YR models by CGM requirements
-        # TODO year needs to be dynamic, taken from opi config
-        if time_horizon == 'YR':
-            intervals = [
-                (pd.Timestamp('2025-01-01 12:30'), pd.Timestamp('2025-02-28 12:30')),
-                (pd.Timestamp('2025-03-01 12:30'), pd.Timestamp('2025-05-31 12:30')),
-                (pd.Timestamp('2025-06-01 12:30'), pd.Timestamp('2025-08-31 12:30')),
-                (pd.Timestamp('2025-09-01 12:30'), pd.Timestamp('2025-11-30 12:30')),
-                (pd.Timestamp('2025-12-01 12:30'), pd.Timestamp('2025-12-31 12:30')),
-            ]
-            matching_interval = [(start, end) for start, end in intervals if start <= model_ts <= end]
-            start = matching_interval[0][0]
-            end = matching_interval[0][1]
-            ts = [ts for ts in critical_timestamps if start <= ts <= end]
-        else:
-            ts = [ts for ts in critical_timestamps if datetime.fromisoformat(model_ts).date() == ts.date()]
-
-        if ts:
-            runs.append((model["DATA"], ts))
-        else:
-            logger.warning(f"No run created for model timestamp: {str(model_ts)}")
-
-    return runs
 
 
 def get_opi_timestamps(iso_offset: str, timestamps_per_day: list, time_horizon: str, set_timestamps=None) -> List[pd.Timestamp]:
@@ -415,11 +219,6 @@ def get_yr_model_timestamp(scenario_timestamp):
     return datetime.strftime(model_timestamp, "%Y-%m-%d")
 
 
-def _drop_nan(record: dict) -> dict:
-    """Remove keys with NaN values (blank Excel cells)."""
-    return {k: v for k, v in record.items() if not (isinstance(v, float) and v != v)}
-
-
 def assessed_elements_from_dataframe(data: str | pd.DataFrame) -> List[AssessedElement]:
     """
     Converts Assessed elements Excel or Dataframe file to assessed elements format for security analysis input
@@ -450,8 +249,8 @@ def assessed_elements_from_dataframe(data: str | pd.DataFrame) -> List[AssessedE
     if 'normal_enabled' in assessed_elements.columns:
         assessed_elements = assessed_elements[assessed_elements.normal_enabled == True]
 
-    # Build AssessedElement instances, blank cells fall back to model defaults
-    converted_assessed_elements = [AssessedElement(**_drop_nan(assessed_element)) for assessed_element in assessed_elements.to_dict('records')]
+    # Build AssessedElement instances
+    converted_assessed_elements = [AssessedElement(**assessed_element) for assessed_element in assessed_elements.to_dict('records')]
 
     return converted_assessed_elements
 
@@ -494,28 +293,6 @@ def contingencies_from_dataframe(data: str | pd.DataFrame) -> List[Contingency]:
                                                          'eq_eic': 'first'}).reset_index().to_dict('records')
 
     # Build Contingency instances
-    converted_contingencies = [Contingency(**{'eq_eic': None, **_drop_nan(contingency)}) for contingency in aggregated_dict]
+    converted_contingencies = [Contingency(**contingency) for contingency in aggregated_dict]
 
     return converted_contingencies
-
-
-if __name__ == "__main__":
-    # Testing
-    from opi.shared.parse_uap import parse_uap_xml
-
-    critical_timestamp_properties = {
-        "OPI_Year": '2026',
-        'Area_tieline_limit': '6',
-        'Area_line_limit': '7',
-        'Region_total_line_limit': '13',
-        'Area_outages_limit': '10',
-        'Region_total_outages_limit': '15',
-        'Unavailable_generation_limit': '800',
-    }
-
-    uap_path = r'/opi/inputs\OpcUnavailabilityPlanManualExport.xml'
-    opc_data = parse_uap_xml(uap_path)
-
-    critical_ts = calculate_critical_timestamps(opc_data, critical_timestamp_properties)
-
-    print("")

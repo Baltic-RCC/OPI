@@ -5,7 +5,6 @@ import logging
 from pathlib import Path
 from typing import Optional, List
 from loadflow_engine.helper import get_network_elements_by_ids
-from opi.shared.parse_uap import parse_uap_xml
 
 logger = logging.getLogger(__name__)
 
@@ -193,8 +192,8 @@ def get_outage_grid_id(relevant_outages_df: pd.DataFrame, element_df: pd.DataFra
         return unique_grid_ids.reset_index(drop=True)
 
     except Exception as e:
-        logger.error(f"Error during outage grid ID mapping: {e}")
-        raise
+        logger.error(f"Error during outage grid ID mapping: {e}", exc_info=True)
+        return pd.Series(dtype=str) # Return empty on error
 
 
 def outage_assessment(network: pp.network,

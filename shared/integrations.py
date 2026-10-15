@@ -2,6 +2,7 @@ import logging
 from opi import configs
 from datetime import datetime
 from brcc_apis.elk_api import Elastic
+from rdflib.plugins.sparql.operators import datetime
 from opi.shared.config_parser import parse_app_properties
 from brcc_apis.minio_api import ObjectStorage
 from brcc_apis import settings_manager
@@ -73,6 +74,7 @@ def query_data(metadata_query: dict, query_filter: str = None, index: str = ELAS
             hits = response["hits"]["hits"]
             if hits:
                 content_list.extend([content["_source"] for content in hits])
+        elastic_service.client.clear_scroll(scroll_id=response['_scroll_id'])
 
     if return_payload:
         for num, item in enumerate(content_list):

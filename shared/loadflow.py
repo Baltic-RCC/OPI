@@ -1,5 +1,4 @@
 import logging
-import zipfile
 import pandas as pd
 from io import BytesIO
 import pypowsybl as pp
@@ -12,78 +11,6 @@ from numpy import nan, sign, isnan
 
 
 logger = logging.getLogger(__name__)
-
-
-def replace_hvdc_reactive_generation(model_network: pp.network, replace_nordbalt=True, replace_estlink1=False):
-
-    dangling_lines = get_network_elements(model_network, pp.network.ElementType.DANGLING_LINE)
-
-    if replace_nordbalt:
-        logger.info(f"Replacing Nordbalt reactive power control")
-
-        # Gets Nordbalt equivalent injection, stored as dangling line
-        nordbalt_dangling_id = '_07e36b15-b7ca-11e7-8108-00505691de36'
-        nordbalt_eq = dangling_lines.loc[[nordbalt_dangling_id]]
-        nordbalt_substation_name = 'KLAIPEDA'
-
-        # Gets reactive power used in the model
-        nordbalt_reactive_power = nordbalt_eq.iloc[0]['q']
-        nordbalt_base_voltage = nordbalt_eq.iloc[0]['v']
-
-        # removes reactive power injection (so it could be added later via generator)
-        model_network.update_dangling_lines(id=nordbalt_dangling_id, q0=0, q=0)
-
-        nordbalt_bus_breaker_bus_id = nordbalt_eq.iloc[0].bus_breaker_bus_id
-        # nordbalt_bus_breaker_bus_id = '9dff0614-f98e-11e6-80f8-00505691de36'
-        nordbalt_voltage_level_id = nordbalt_eq.iloc[0].voltage_level_id
-        # nordbalt_voltage_level_id = '7dd669aa-f98e-11e6-80f8-00505691de36'
-
-        model_network.create_generators(id='nordbalt_reactive_generator',
-                                        voltage_level_id=nordbalt_voltage_level_id,
-                                        bus_id=nordbalt_bus_breaker_bus_id,
-                                        target_p=1,
-                                        target_q=nordbalt_reactive_power,
-                                        min_p=0,
-                                        max_p=10,
-                                        target_v=433.0,
-                                        # target_v=float(nordbalt_base_voltage),
-                                        voltage_regulator_on=True)
-
-        # Generator is created without reactive minmax limits, so we need to create them separately
-        model_network.create_minmax_reactive_limits(id='nordbalt_reactive_generator', min_q=-250, max_q=250)
-
-    # Estlink2 has no reactive power control
-    if replace_estlink1:
-        logger.info(f"Replacing Estlink 1 reactive power control")
-
-        estlink_1_dangling_id = '_0ff2c836-a2ca-41c2-a9fb-61aa6ab88026'
-        estlink_1_eq = dangling_lines.loc[[estlink_1_dangling_id]]
-
-        # Gets reactive power used in the model
-        estlink_1_reactive_power = estlink_1_eq.iloc[0]['q']
-        estlink_1_base_voltage = estlink_1_eq.iloc[0]['v']
-
-        # removes reactive power injection (so it could be added later via generator)
-        model_network.update_dangling_lines(id=estlink_1_dangling_id, q0=0, q=0)
-
-        estlink_1_bus_breaker_bus_id = estlink_1_eq.iloc[0].bus_breaker_bus_id
-        estlink_1_voltage_level_id = estlink_1_eq.iloc[0].voltage_level_id
-
-        model_network.create_generators(id='estlink1_reactive_generator',
-                                        voltage_level_id=estlink_1_voltage_level_id,
-                                        bus_id=estlink_1_bus_breaker_bus_id,
-                                        target_p=0,
-                                        target_q=estlink_1_reactive_power,
-                                        min_p=0,
-                                        max_p=5,
-                                        # target_v=float(estlink_1_base_voltage),
-                                        target_v=358.0,
-                                        voltage_regulator_on=True)
-
-        # Generator is created without reactive minmax limits, so we need to create them separately
-        model_network.create_minmax_reactive_limits(id='estlink1_reactive_generator', min_q=-60, max_q=60)
-
-    return model_network
 
 
 def unzip_zipped_profiles(path_or_buffer: str):
@@ -131,7 +58,6 @@ def load_network(network, parameters):
     logger.info("Loading model into pypowsybl")
 
     if bytes == type(network):
-        # network = cleanup_old_rmm_files(BytesIO(network))
         try:
             network = unzip_zipped_profiles(BytesIO(network))
         except Exception as error:
@@ -147,28 +73,6 @@ def load_network(network, parameters):
 
     return network
 
-
-def cleanup_old_rmm_files(object: BytesIO):
-
-    new_object = BytesIO()
-
-    with zipfile.ZipFile(object, 'r') as input_zip:
-        filenames = input_zip.namelist()
-
-        with zipfile.ZipFile(new_object, 'w') as output_zip:
-
-            for filename in filenames:
-                if (('SV' in filename or 'SSH' in filename) and 'BALTICRSC' not in filename):
-                    continue
-
-                with input_zip.open(filename) as file:
-                    file_content = file.read()
-
-                output_zip.writestr(filename, file_content)
-
-    new_object.seek(0)
-
-    return new_object
 
 def get_power_losses(network: pp.network, by_region: bool = False, present_igms: list = None):
     """

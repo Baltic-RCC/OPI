@@ -1,14 +1,8 @@
 import json
 import logging
-import opi.configs
-from opi.shared.config_parser import parse_app_properties
-import opi.shared.sa_config as sa_conf
 from opi.core.opi_analysis import OutagePlanIncompatibilityAssessment
-
-parse_app_properties(caller_globals=globals(), path=opi.configs.paths.integrations.elastic)
-parse_app_properties(caller_globals=globals(), path=opi.configs.paths.integrations.minio)
-
-sa_config = sa_conf.SecurityAnalysis(suspend_stdout=True)
+from opi.shared.integrations import (ELK_SERVER, ELK_UAP_INDEX, DATA_IMPORT_BUCKET, DATA_EXPORT_BUCKET,
+                                     OPI_MODEL_EXPORT_FOLDER)
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +27,8 @@ class HandlerRunOpi:
         self.name = 'opi_handler'
 
     def handle(self, task_object):
-        from opi.shared.logging_setup import log_context
-        from opi.shared.process_results import get_opi_week_number, get_result_opi_year
+        from opi.core.opi_worker import log_context
+        from opi.shared.process_results import get_opi_week_number
         from datetime import datetime
 
         task = task_object
@@ -48,7 +42,7 @@ class HandlerRunOpi:
             "@time_horizon": task['time_horizon'],
             "@scenario_timestamp": task['scenario_timestamp'],
             "@version": task['task_version'],
-            "opi_year": get_result_opi_year(timestamp, task['time_horizon'], task['opi_year']),
+            "opi_year": task['opi_year'],
             "opi_month": str(timestamp.month),
             "opi_week": get_opi_week_number(timestamp),
 
@@ -59,7 +53,7 @@ class HandlerRunOpi:
         # Create OPI class object
         opi_service = OutagePlanIncompatibilityAssessment(task=task)
         opi_service.get_loadflow_settings(elk_server=ELK_SERVER)
-        opi_service.get_input_data(minio_bucket=DATA_IMPORT_BUCKET)
+        opi_service.get_input_data(minio_bucket=DATA_IMPORT_BUCKET, use_local_inputs=opi_service.use_default_inputs)
         opi_service.get_elk_uap(index=ELK_UAP_INDEX)
         opi_service.get_opi_model()
         opi_service.load_model_data()
@@ -70,7 +64,6 @@ class HandlerRunOpi:
 
         # Perform OPI calculation
         opi_service.calculate_opi()
-        sa_diverged = opi_service.opi_results is None
         if opi_service.export_models:
             opi_service.export_model_to_minio(bucket=DATA_EXPORT_BUCKET, folder=OPI_MODEL_EXPORT_FOLDER)
         # After calculate_opi: adds to opi_results, also when security analysis diverged
@@ -83,13 +76,9 @@ class HandlerRunOpi:
             opi_service.update_result_metadata()
 
             if opi_service.send_to_elk is True:
-                if not opi_service.send_results_to_elk():
-                    raise RuntimeError(f"Sending results to ELK failed, timestamp {task['scenario_timestamp']}")
+                opi_service.send_results_to_elk()
 
             logger.info(f"{opi_service.scenario_timestamp} OPI calculation finished")
-
-        if sa_diverged:
-            raise RuntimeError(f"Security analysis diverged, no OPI results for timestamp {task['scenario_timestamp']}")
 
         return task_object
 

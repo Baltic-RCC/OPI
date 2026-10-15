@@ -3,8 +3,6 @@ import uuid
 import pandas as pd
 from pathlib import Path
 from opi.shared.opi_functions import assessed_elements_from_dataframe, contingencies_from_dataframe
-from brcc_apis import  minio_api
-import opi.core.config as conf
 import logging
 import isodate
 import inspect
@@ -15,23 +13,13 @@ from opi.shared.loadflow import load_network
 from loadflow_engine.security_analysis import SecurityAnalysis
 from opi.configs.opi import opi_lf_parameters
 from opi.shared.opi_functions import get_yr_model_timestamp
-import opi.shared.sa_config as shared_config
-from opi.shared.opi_functions import run_outage_crosscheck
+from opi.shared.outage_crosscheck import run_outage_crosscheck
 from opi.shared.outage_crosscheck import get_relevant_outages
 from opi.shared.process_results import get_system_balance, get_ba_cross_border_flows
 import pypowsybl as pp
 import zipfile
 from opi.shared.integrations import (get_all_minio_objects, query_data, download_models_from_minio, get_docs_by_query,
                                      get_lf_settings_manager, minio_service)
-
-# Loading configuration
-sa_config = shared_config.SecurityAnalysis(suspend_stdout=True)
-config = conf.get_config(logging=conf.ElkLogging(),
-                         elastic=conf.Elk(),
-                         rmq=conf.RMQ(),
-                         minio=conf.Minio(suspend_stdout=True),
-                         process=conf.OperationalSecurityAssessment(),
-                         )
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +118,6 @@ class OutagePlanIncompatibilityAssessment:
             lf_settings_manager = get_lf_settings_manager(elk_server, self.lf_parameters_key)
             self.lf_parameters = lf_settings_manager.build_pypowsybl_parameters()
             self.sa_parameters = getattr(opi_lf_parameters, "SA_PARAMETERS")
-            logger.info(f"LF settings loaded from Elasticsearch settings manager: {self.lf_parameters_key}")
         except Exception as error:
             logger.error(f"LF settings retrieving from Elasticsearch failed: {error}")
             logger.info("Using LF settings defined in repository")
@@ -148,8 +135,6 @@ class OutagePlanIncompatibilityAssessment:
             assessed_element_df = pd.read_excel(assessed_elements_path)
             contingency_df = pd.read_excel(contingencies_path)
         else:
-            minio_service = minio_api.ObjectStorage(server=OBJECTSTORAGE_URL, username=OBJECTSTORAGE_USERNAME,
-                                                    password=OBJECTSTORAGE_PASSWORD)
             assessed_element_df = pd.read_excel(
                 BytesIO(minio_service.download_object(minio_bucket, f'{self.data_import_folder}/assessed_element_list.xlsx')))
             contingency_df = pd.read_excel(
@@ -255,8 +240,8 @@ class OutagePlanIncompatibilityAssessment:
                     model_data = download_models_from_minio(minio_folder=[model['content_reference']])
                     if model_data:
                         logger.info(f"Model retrieved: {model['name']}")
-                except Exception as error:
-                    raise ValueError(f"Model download failed for {model['name']}: {error}") from error
+                except:
+                    raise ValueError(f"Model was not found for timestamp: {self.scenario_timestamp}")
             else:
                 raise ValueError(f"Model was not found for timestamp: {self.scenario_timestamp}")
 
@@ -266,7 +251,7 @@ class OutagePlanIncompatibilityAssessment:
 
     def load_model_data(self):
 
-        self.pp_network = load_network(self.model_data, parameters=sa_config.cgmes_import)
+        self.pp_network = load_network(self.model_data, parameters=opi_lf_parameters.CGMES_IMPORT_PARAMETERS)
         self.security_service = SecurityAnalysis(network=self.pp_network, contingencies=self.contingencies,
                                                  assessed_elements=self.assessed_elements,
                                                  lf_parameters=self.lf_parameters, sa_parameters=self.sa_parameters,
@@ -347,9 +332,7 @@ class OutagePlanIncompatibilityAssessment:
 
         changed_outage_list = []
         # Reconnecting relevant outages
-        # TODO add reconnect flag to manual run config
-        reconnect = True
-        if reconnect:
+        if self.reconnect_outages:
             logger.info(f"Reconnecting outages to network instance: '{outage_configuration_id}'")
             for index, outage in self.outages_to_reconnect.iterrows():
                 if outage.type != 'transformer' and outage.area != 'PL' and pd.notna(outage.equipment):
@@ -493,7 +476,7 @@ class OutagePlanIncompatibilityAssessment:
 
     def update_result_metadata(self):
 
-        from opi.shared.process_results import get_opi_week_number, get_result_opi_year
+        from opi.shared.process_results import get_opi_week_number
 
         logger.info("Parsing finalized results")
 
@@ -509,8 +492,15 @@ class OutagePlanIncompatibilityAssessment:
                 result_df['week_day'] = timestamp.weekday()
                 opi_week = get_opi_week_number(timestamp)
                 result_df['opi_week'] = opi_week
-                result_df['opi_month'] = str(timestamp.month)
-                result_df['opi_year'] = get_result_opi_year(timestamp, self.time_horizon, self.opi_year)
+                result_df['opi_month'] = opi_month = str(timestamp.month)
+                if self.time_horizon == "WK":
+                    # Keep last week of the year in previous year if timestamp is after new year
+                    if opi_week in ['52', '53'] and opi_month == "1":
+                        result_df['opi_year'] = str(timestamp.year - 1)
+                    else:
+                        result_df['opi_year'] = str(timestamp.year)
+                else:
+                    result_df['opi_year'] = self.opi_year
 
 
     def send_results_to_elk(self):
@@ -518,5 +508,3 @@ class OutagePlanIncompatibilityAssessment:
         from opi.shared.data_functions import send_opi_results_to_elk
 
         response = send_opi_results_to_elk(self.opi_results, self.time_horizon, self.scenario_timestamp)
-
-        return all(item is not False for item in response)

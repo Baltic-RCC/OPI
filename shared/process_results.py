@@ -1,5 +1,3 @@
-from typing import Any
-import uuid
 import openpyxl.styles
 import pandas as pd
 import openpyxl
@@ -7,13 +5,9 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.utils.dataframe import dataframe_to_rows
 import datetime
 import logging
-import numpy as np
-from word2number import w2n
 from pathlib import Path
 import pypowsybl as pp
 from io import BytesIO
-from collections import deque
-import configparser
 from opi.shared.loadflow import get_network_elements, get_power_losses, get_xborder_flows
 
 # Start logger
@@ -65,167 +59,6 @@ def get_ba_cross_border_flows(service):
     return result_df.reset_index(names=['name']).drop_duplicates(subset='name')
 
 
-def process_base_case_results(service):
-    # Load line limits from xlsx
-    line_limits = pd.read_excel(Path(__file__).parent.parent.joinpath('inputs/general/line_limits.xlsx'))
-
-    bc_branch_result = service.results.branch_results.reset_index().query("contingency_id == ''")
-    # Get only line results
-    assessed_lines = service.available_assessed_elements[service.available_assessed_elements['equipment_type'].isin(['LINE', 'DANGLING_LINE'])]
-    bc_branch_result = bc_branch_result.merge(assessed_lines, left_on='branch_id', right_on='equipment', how='right')
-    bc_branch_result = bc_branch_result[bc_branch_result['name'].isin(assessed_lines['name'])]
-
-    # Get positive values for average value calculation
-    bc_branch_result.loc[:, ['p1', 'p2', 'i1', 'i2']] = bc_branch_result.loc[:, ['p1', 'p2', 'i1', 'i2']].apply(lambda x: abs(x))
-    bc_branch_result['P'] = bc_branch_result[['p1', 'p2']].mean(axis=1)
-    bc_branch_result = bc_branch_result.drop(columns=['p1', 'p2'])
-    bc_branch_result['I'] = bc_branch_result[['i1', 'i2']].mean(axis=1)
-    bc_branch_result = bc_branch_result.drop(columns=['i1', 'i2'])
-    current_limits = service.network.get_current_limits().reset_index()
-    current_limits = current_limits[~current_limits['branch_id'].duplicated(keep='first')]
-
-    bc_branch_result['I_max'] = bc_branch_result.merge(current_limits, on='branch_id', how='left')['value']
-    bc_branch_result['Line limit'] = bc_branch_result.merge(line_limits, left_on='equipment', right_on='grid_id', how='left')['default_limit']
-    bc_branch_result['I_max'] = bc_branch_result['I_max'].replace('', None)
-    bc_branch_result['I_max'] = bc_branch_result['I_max'].fillna(bc_branch_result['Line limit']).astype(float)
-
-    bc_branch_result['I_loading_%'] = bc_branch_result['I'] / bc_branch_result['I_max'] * 100
-    bc_branch_result = bc_branch_result.sort_values('I_loading_%', ascending=False)
-
-    substations = service.network.get_substations(all_attributes=True)
-    substations.rename(columns={'name': 'substation_name', 'CGMES.regionName': 'area'}, inplace=True)
-    voltage_levels = service.network.get_voltage_levels()
-    voltage_levels = voltage_levels.merge(substations[['area', 'substation_name']], left_on='substation_id',
-                                          right_index=True)
-
-    # Mapping base case load flow results to bus results
-    bc_bus_result = service.results.bus_results.reset_index().query("contingency_id == ''")
-    bc_bus_result = bc_bus_result.sort_values(by='v_mag', ascending=False)
-    bc_bus_result = bc_bus_result.drop_duplicates(subset='voltage_level_id', keep='first').set_index('voltage_level_id')
-    bc_bus_result = bc_bus_result.merge(voltage_levels, left_on='voltage_level_id',
-                                        right_index=True, how='left')
-    bc_bus_result = bc_bus_result.sort_values('name', ascending=True)
-
-    # Remove lines without flow
-    bc_branch_result = bc_branch_result[~pd.isna(bc_branch_result['I'])]
-    bc_branch_result = bc_branch_result.drop_duplicates(subset='name', keep='first')
-
-    return bc_bus_result, bc_branch_result
-
-
-def process_opi_violations(service):
-    def _set_base_case_violation_flags(violation):
-        if violation.limit_type in ['CURRENT', 'HIGH_VOLTAGE']:
-            return True if violation.base_case_value_percent >= 100 else False
-        elif violation.limit_type == 'LOW_VOLTAGE':
-            return True if violation.base_case_value_percent <= 100 else False
-        else:
-            return None
-
-    opi_violations: pd.DataFrame = service.results.limit_violations.reset_index()
-    opi_violations['subject_name'] = opi_violations['subject_id'].map(service.mrid_name_map)
-
-    # Mapping violated element types
-    identifiables = service.network.get_identifiables()
-    opi_violations = opi_violations.merge(identifiables.rename(columns={'type': 'subject_type'}),
-                                          left_on='subject_id', right_index=True, how='left')
-
-    # Mapping contingency element names
-    _contingencies_map = service.contingencies_df.set_index('mRID')['name'].drop_duplicates()
-    opi_violations['contingency_name'] = opi_violations['contingency_id'].map(_contingencies_map).fillna("")
-
-    # Mapping substation/area to violations on nodes (voltage levels)
-    substations = service.network.get_substations(all_attributes=True)
-    substations.rename(columns={'name': 'substation_name', 'CGMES.regionName': 'area'}, inplace=True)
-    voltage_levels = service.network.get_voltage_levels()
-    voltage_levels = voltage_levels.merge(substations[['area', 'substation_name']], left_on='substation_id',
-                                          right_index=True)
-    opi_violations = opi_violations.merge(voltage_levels[['area', 'substation_name', 'nominal_v']],
-                                          left_on='subject_id', right_index=True, how='left')
-
-    # Mapping substation/area to violations on branches (current violations)
-    _branches = get_network_elements(network=service.network, element_type=pp.network.ElementType.BRANCH)
-    _dangling_lines = get_network_elements(network=service.network, element_type=pp.network.ElementType.DANGLING_LINE)
-    _dangling_lines.rename(columns={'substation_name': 'substation_name1', 'CGMES.regionName': 'CGMES.regionName1'}, inplace=True)
-    _3w_transformers = get_network_elements(network=service.network, element_type=pp.network.ElementType.THREE_WINDINGS_TRANSFORMER)
-    _3w_transformers['type'] = '3W_TRANSFORMER'
-    _dangling_lines['type'] = 'DANGLING_LINE'
-    _elements = pd.concat([_branches, _dangling_lines, _3w_transformers])
-    _relevant_columns = _elements.columns[_elements.columns.str.contains('substation_name|CGMES.regionName|nominal_v', regex=True)]
-    for side_key in [x for x in opi_violations.side.unique() if x != ""]:
-        side_key_integer = w2n.word_to_num(side_key)
-        mask = (opi_violations['side'] == side_key)
-        opi_violations.loc[mask, 'area'] = opi_violations[mask].merge(_elements[_relevant_columns], left_on='subject_id', right_index=True)[
-                f"CGMES.regionName{side_key_integer}"]
-        opi_violations.loc[mask, 'substation_name'] = opi_violations[mask].merge(_elements[_relevant_columns], left_on='subject_id', right_index=True)[
-                f"substation_name{side_key_integer}"]
-        opi_violations.loc[mask, 'nominal_v'] = opi_violations[mask].merge(_elements[_relevant_columns], left_on='subject_id', right_index=True)[
-                f"nominal_v{side_key_integer}"]
-
-    # Mapping base case load flow results to violations
-    opi_violations['base_case_value'] = np.nan
-    bc_bus_result = service.results.bus_results.reset_index().query("contingency_id == ''")
-    bc_bus_result = bc_bus_result.sort_values(by='v_mag', ascending=False)
-    bc_bus_result = bc_bus_result.drop_duplicates(subset='voltage_level_id', keep='first').set_index('voltage_level_id')
-    opi_violations['base_case_value'] = opi_violations.merge(bc_bus_result['v_mag'], left_on='subject_id', right_index=True, how='left')['v_mag']
-    bc_branch_result = service.results.branch_results.reset_index().query("contingency_id == ''").set_index('branch_id')
-    bc_3wtr_result = service.results.three_windings_transformer_results.reset_index().query("contingency_id == ''").set_index('transformer_id')
-    bc_branch_result = pd.concat([bc_branch_result, bc_3wtr_result])
-    for side_key in [x for x in opi_violations.side.unique() if x != ""]:
-        side_key_integer = w2n.word_to_num(side_key)
-        mask = (opi_violations['side'] == side_key)
-        opi_violations.loc[mask, 'base_case_value'] = opi_violations[mask].merge(bc_branch_result[f"i{side_key_integer}"],
-                                                                                 left_on='subject_id',
-                                                                                 right_index=True)[f"i{side_key_integer}"]
-
-    # Calculate violation value in percentage
-    opi_violations['value_percent'] = opi_violations['value'] / opi_violations['limit'] * 100
-    opi_violations['base_case_value_percent'] = opi_violations['base_case_value'] / opi_violations['limit'] * 100
-
-    # Setting base case violation flag
-    opi_violations.loc[:, 'base_case_violation'] = opi_violations.apply(_set_base_case_violation_flags, axis=1)
-
-    # Filter violations by monitored elements
-    mask_monitored_branches = opi_violations['subject_id'].isin([item.equipment for item in service.assessed_elements])
-
-    return opi_violations[mask_monitored_branches]
-
-
-def create_dataframe_tuple_from_results(results: list, time_horizon: str) -> tuple[list[Any], list[str]]:
-
-    merged_results = []
-    run_id = str(uuid.uuid4())
-    for result in results:
-        timestamp = deque(result).popleft()
-        result_list = []
-        for df in result:
-            new_df = df.copy()
-            new_df['@scenario_timestamp'] = timestamp.isoformat()
-            new_df['@time_horizon'] = time_horizon
-            new_df['@run_id'] = run_id
-            new_df['@version'] = 0
-            new_df['week_day'] = timestamp.weekday()
-            opi_week = get_opi_week_number(timestamp)
-            new_df['opi_week'] = opi_week
-            opi_month = str(timestamp.month)
-            new_df['opi_month'] = opi_month
-            if time_horizon == "WK":
-                # Keep last week of the year in previous year if timestamp is after new year
-                if opi_week in ['52','53'] and opi_month == "1":
-                    new_df['opi_year'] = str(timestamp.year - 1)
-                else:
-                    new_df['opi_year'] = str(timestamp.year)
-            else:
-                new_df['opi_year'] = str(timestamp.year)
-            result_list.append(new_df)
-        merged_results.append(result_list)
-    config = configparser.RawConfigParser()
-    config.read("results.ini")
-    DATAFRAME_NAMES = [config['names']['dataframe_names']]
-
-    return merged_results, DATAFRAME_NAMES
-
-
 def get_opi_week_number(timestamp: pd.Timestamp) -> str:
     if timestamp.weekday() == 4:
         last_friday = timestamp - pd.Timedelta(days=7)
@@ -235,15 +68,6 @@ def get_opi_week_number(timestamp: pd.Timestamp) -> str:
     week_number = last_friday.isocalendar().week
 
     return str(week_number)
-
-
-def get_result_opi_year(timestamp: datetime.datetime, time_horizon: str, task_opi_year: str) -> str:
-    """opi_year for results and logs; W-1 weeks 52/53 dated in January stay in the previous year."""
-    if time_horizon == "WK":
-        if get_opi_week_number(timestamp) in ['52', '53'] and timestamp.month == 1:
-            return str(timestamp.year - 1)
-        return str(timestamp.year)
-    return task_opi_year
 
 
 def format_numbers(worksheet: Worksheet):

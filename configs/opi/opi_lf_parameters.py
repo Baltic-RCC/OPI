@@ -1,5 +1,11 @@
 import pypowsybl
 
+# CGMES import parameters used to load OPI models
+CGMES_IMPORT_PARAMETERS = {
+    "iidm.import.cgmes.source-for-iidm-id": "rdfID",
+    "iidm.import.cgmes.import-node-breaker-as-bus-breaker": "True",
+}
+
 """
 Related documentation:
 https://www.powsybl.org/pages/documentation/simulation/powerflow/openlf.html#parameters
