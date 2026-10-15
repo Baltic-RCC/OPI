@@ -1,0 +1,383 @@
+import logging
+import zipfile
+import pandas as pd
+from io import BytesIO
+import pypowsybl as pp
+from zipfile import ZipFile, ZIP_DEFLATED
+from pypowsybl.network import ElementType
+from loadflow_engine.helper import get_network_elements
+from opi.shared.constants import CROSS_BORDER_DATA
+from opi.shared.utilities import cross_border_region_name_check, direction_check_hvdc
+from numpy import nan, sign, isnan
+
+
+logger = logging.getLogger(__name__)
+
+
+def replace_hvdc_reactive_generation(model_network: pp.network, replace_nordbalt=True, replace_estlink1=False):
+
+    dangling_lines = get_network_elements(model_network, pp.network.ElementType.DANGLING_LINE)
+
+    if replace_nordbalt:
+        logger.info(f"Replacing Nordbalt reactive power control")
+
+        # Gets Nordbalt equivalent injection, stored as dangling line
+        nordbalt_dangling_id = '_07e36b15-b7ca-11e7-8108-00505691de36'
+        nordbalt_eq = dangling_lines.loc[[nordbalt_dangling_id]]
+        nordbalt_substation_name = 'KLAIPEDA'
+
+        # Gets reactive power used in the model
+        nordbalt_reactive_power = nordbalt_eq.iloc[0]['q']
+        nordbalt_base_voltage = nordbalt_eq.iloc[0]['v']
+
+        # removes reactive power injection (so it could be added later via generator)
+        model_network.update_dangling_lines(id=nordbalt_dangling_id, q0=0, q=0)
+
+        nordbalt_bus_breaker_bus_id = nordbalt_eq.iloc[0].bus_breaker_bus_id
+        # nordbalt_bus_breaker_bus_id = '9dff0614-f98e-11e6-80f8-00505691de36'
+        nordbalt_voltage_level_id = nordbalt_eq.iloc[0].voltage_level_id
+        # nordbalt_voltage_level_id = '7dd669aa-f98e-11e6-80f8-00505691de36'
+
+        model_network.create_generators(id='nordbalt_reactive_generator',
+                                        voltage_level_id=nordbalt_voltage_level_id,
+                                        bus_id=nordbalt_bus_breaker_bus_id,
+                                        target_p=1,
+                                        target_q=nordbalt_reactive_power,
+                                        min_p=0,
+                                        max_p=10,
+                                        target_v=433.0,
+                                        # target_v=float(nordbalt_base_voltage),
+                                        voltage_regulator_on=True)
+
+        # Generator is created without reactive minmax limits, so we need to create them separately
+        model_network.create_minmax_reactive_limits(id='nordbalt_reactive_generator', min_q=-250, max_q=250)
+
+    # Estlink2 has no reactive power control
+    if replace_estlink1:
+        logger.info(f"Replacing Estlink 1 reactive power control")
+
+        estlink_1_dangling_id = '_0ff2c836-a2ca-41c2-a9fb-61aa6ab88026'
+        estlink_1_eq = dangling_lines.loc[[estlink_1_dangling_id]]
+
+        # Gets reactive power used in the model
+        estlink_1_reactive_power = estlink_1_eq.iloc[0]['q']
+        estlink_1_base_voltage = estlink_1_eq.iloc[0]['v']
+
+        # removes reactive power injection (so it could be added later via generator)
+        model_network.update_dangling_lines(id=estlink_1_dangling_id, q0=0, q=0)
+
+        estlink_1_bus_breaker_bus_id = estlink_1_eq.iloc[0].bus_breaker_bus_id
+        estlink_1_voltage_level_id = estlink_1_eq.iloc[0].voltage_level_id
+
+        model_network.create_generators(id='estlink1_reactive_generator',
+                                        voltage_level_id=estlink_1_voltage_level_id,
+                                        bus_id=estlink_1_bus_breaker_bus_id,
+                                        target_p=0,
+                                        target_q=estlink_1_reactive_power,
+                                        min_p=0,
+                                        max_p=5,
+                                        # target_v=float(estlink_1_base_voltage),
+                                        target_v=358.0,
+                                        voltage_regulator_on=True)
+
+        # Generator is created without reactive minmax limits, so we need to create them separately
+        model_network.create_minmax_reactive_limits(id='estlink1_reactive_generator', min_q=-60, max_q=60)
+
+    return model_network
+
+
+def unzip_zipped_profiles(path_or_buffer: str):
+    """
+    Extracts zipped profiles of a model.
+    Detects automatically if the zipped folder is read from file bath or BytesIO buffer.
+    :param path_or_buffer: path of zipped model or BytesIO buffer
+    :return: output_zip_buffer
+    """
+    # Checks if path_or_buffer is string
+    if isinstance(path_or_buffer, str):
+        with open(path_or_buffer, 'rb') as original_zip_file:
+            original_zip_buffer = BytesIO(original_zip_file.read())
+
+    # Checks if path_or_buffer is BytesIO class
+    elif isinstance(path_or_buffer, BytesIO):
+        original_zip_buffer = path_or_buffer
+    else:
+        logger.error(f"Provided variable is nor string nor BytesIO object")
+
+    output_zip_buffer = BytesIO()
+
+    # Read the original zipped folder from provided buffer
+    with ZipFile(original_zip_buffer, 'r') as original_zip:
+        # Create a new zip file where we will store the unzipped XMLs
+        with ZipFile(output_zip_buffer, 'w', ZIP_DEFLATED) as new_zip:
+            # Iterate trough each file in the original zip
+            for file_name in original_zip.namelist():
+                # Read the zipped xml file
+                with original_zip.open(file_name) as zipped_xml_file:
+                    with ZipFile(zipped_xml_file) as zipped_xml:
+                        # Extract each file and add it to the new zip
+                        for xml_file_name in zipped_xml.namelist():
+                            xml_data = zipped_xml.read(xml_file_name)
+                            # Add unzipped XML file to the new zip
+                            new_zip.writestr(xml_file_name, xml_data)
+
+    output_zip_buffer.seek(0)
+
+    return output_zip_buffer
+
+
+def load_network(network, parameters):
+
+    logger.info("Loading model into pypowsybl")
+
+    if bytes == type(network):
+        # network = cleanup_old_rmm_files(BytesIO(network))
+        try:
+            network = unzip_zipped_profiles(BytesIO(network))
+        except Exception as error:
+            logger.error(error)
+        network = pp.network.load_from_binary_buffer(network, parameters=parameters)
+    if str == type(network):
+        try:
+            network = unzip_zipped_profiles(BytesIO(network))
+            network = pp.network.load_from_binary_buffer(network, parameters=parameters)
+        except Exception as error:
+            logger.error(error)
+            network = pp.network.load(network, parameters=parameters)
+
+    return network
+
+
+def cleanup_old_rmm_files(object: BytesIO):
+
+    new_object = BytesIO()
+
+    with zipfile.ZipFile(object, 'r') as input_zip:
+        filenames = input_zip.namelist()
+
+        with zipfile.ZipFile(new_object, 'w') as output_zip:
+
+            for filename in filenames:
+                if (('SV' in filename or 'SSH' in filename) and 'BALTICRSC' not in filename):
+                    continue
+
+                with input_zip.open(filename) as file:
+                    file_content = file.read()
+
+                output_zip.writestr(filename, file_content)
+
+    new_object.seek(0)
+
+    return new_object
+
+def get_power_losses(network: pp.network, by_region: bool = False, present_igms: list = None):
+    """
+    Gets power losses in MegaWatts from the model
+    :param network: loadflow_engine2.network.load()
+        Network created in PyPowSyBl using pp.network.load()
+    :param by_region: bool, default False
+        True: calculates power losses to each area and for tie lie lines separately
+        False: calculates the power losses for whole model
+    :param present_igms: list, default None
+        Cross-borders that are available in the model.
+        Note: Check from loadflow_engine2.capacity.py get_present_igms()
+    :returns:
+        DataFrame
+            by_region = True -> a 1xn DataFrame where n represents the areas + tie-lines and the rows consist of power
+            losses
+        float
+            by_region = False -> a float value of the whole area's power losses
+    """
+
+    # Reads and calculates losses on lines
+    lines = get_network_elements(network=network, element_type=pp.network.ElementType.LINE)
+    lines['P_loss'] = abs(abs(lines.p1) - abs(lines.p2))
+    P_loss_line = lines['P_loss'].sum()
+
+    tie_lines = get_network_elements(network=network, element_type=pp.network.ElementType.TIE_LINE)
+    dang = get_network_elements(network=network, element_type=pp.network.ElementType.DANGLING_LINE)
+    tie_lines_and_dang1 = tie_lines.merge(dang[['p']], left_on='dangling_line1_id', right_index=True).rename(
+        columns={'p': 'p1'})
+    tie_lines_and_dang1_and_dang2 = tie_lines_and_dang1.merge(dang[['p']], left_on='dangling_line2_id',
+                                                              right_index=True).rename(columns={'p': 'p2'})
+    tie_lines_and_dang1_and_dang2['P_losses'] = tie_lines_and_dang1_and_dang2[['p1', 'p2']].abs().max(axis=1) - \
+                                                tie_lines_and_dang1_and_dang2[['p1', 'p2']].abs().min(axis=1)
+    P_loss_tie_line = tie_lines_and_dang1_and_dang2['P_losses'].sum()
+
+    # Reads and calculates losses on two winding transformers
+    transformers_two = get_network_elements(network=network,
+                                            element_type=pp.network.ElementType.TWO_WINDINGS_TRANSFORMER)
+    transformers_two['P_loss'] = abs(abs(transformers_two.p1) - abs(transformers_two.p2))
+    P_loss_trans_two = transformers_two['P_loss'].sum()
+
+    # Reads and calculates losses on three winding transformers
+    transformers_three = get_network_elements(network=network,
+                                              element_type=pp.network.ElementType.THREE_WINDINGS_TRANSFORMER)
+    transformers_three['P_loss'] = abs(abs(transformers_three.p1) -
+                                       abs(transformers_three.p2) - abs(transformers_three.p3))
+    P_loss_trans_three = transformers_three['P_loss'].sum()
+
+    system_power_losses = (P_loss_line + P_loss_tie_line + P_loss_trans_two + P_loss_trans_three)
+
+    if by_region:
+        all_elements = pd.concat([lines, transformers_two, transformers_three])
+        all_region_losses_dict = {}
+
+        for region in present_igms:
+            region_losses = all_elements[all_elements["CGMES.regionName1"] == region]['P_loss'].sum()
+            all_region_losses_dict[region] = pd.DataFrame({region: [region_losses]})
+
+        all_region_losses_dict['Tie_lines'] = pd.DataFrame({'Tie_lines': [P_loss_tie_line]})
+        df_losses = pd.concat(all_region_losses_dict.values(), axis=1)
+
+        return round(df_losses, 2)
+
+    return round(system_power_losses, 2)
+
+
+def get_xborder_flows(network, cross_border: str, logger_output: bool = True):
+    """
+    Returns a specific cross-border's lines flows values.
+    :param network, loadflow_engine2 network instance
+    :param cross_border: str
+        A string of the cross-border.
+    :param logger_output: bool, default True.
+        True: shows a summary of the calculation in logger
+        False: does not show any logger
+    :return:
+        Pandas dataframe
+    """
+    # Extract the lists based on the cross border
+    xnodes = CROSS_BORDER_DATA[cross_border]['XNODES']
+    line_names = CROSS_BORDER_DATA[cross_border]['LINE_NAMES']
+
+    # Reading a line. Xborder lines are under dangling lines
+    dangling_no_voltage = get_network_elements(network=network, element_type=ElementType.DANGLING_LINE).reset_index()
+    # Merges buses to determine the voltage
+    buses = network.get_buses()
+    dangling_lines_no_limits = dangling_no_voltage.merge(buses,
+                                                         how='inner',
+                                                         left_on='voltage_level_id',
+                                                         right_on='voltage_level_id')
+    # Merges operational limits to get the current limit
+    op_limits = network.get_operational_limits()
+    op_limits = op_limits[op_limits['name'] == 'permanent_limit']
+    op_limits = op_limits[~op_limits.index.duplicated(keep='first')]
+
+    dangling_lines = dangling_lines_no_limits.merge(op_limits['value'], how='left', left_on='id', right_index=True)
+
+    # Determines up and down regions
+    if 'Estonia' in network.get_substations(all_attributes=True)['CGMES.regionName'].unique():
+        up, down = cross_border_region_name_check(cross_border, ee_cgmes_region_name='Estonia')
+    else:
+        up, down = cross_border_region_name_check(cross_border)
+
+    # List for later appending
+    p_list = []
+    i_list = []
+    i_limit_list = []
+
+    if logger_output:
+        logger.info(f"Reading {cross_border} cross-border results:")
+
+    for node, line_name in zip(xnodes, line_names):
+        # sorts dangling lines for specific nodes
+        df = dangling_lines.loc[dangling_lines['ucte_xnode_code'] == node]
+
+        # Check for duplicates
+        duplicates = df[df.duplicated(subset='CGMES.regionName', keep=False)]
+        if not duplicates.empty:
+            duplicates_groups = duplicates.groupby('CGMES.regionName').size()
+            for region, count in duplicates_groups.items():
+                if logger_output:
+                    logger.warning(f"For {line_name}, {count} duplicates were found in region {region}")
+            df = df.drop_duplicates(subset='CGMES.regionName')
+
+        # Checks if line is disconnected
+        try:
+            # Determines flow direction. Minus sign means flows towards the node
+            p_up = df[(df['CGMES.regionName'] == up)].iloc[0]['p']
+            p_down = df[(df['CGMES.regionName'] == down)].iloc[0]['p']
+
+            # Determines current limit
+            i = min(df[(df['CGMES.regionName'] == up)].iloc[0]['i'],
+                    df[(df['CGMES.regionName'] == down)].iloc[0]['i'])
+            i_limit = min(df[(df['CGMES.regionName'] == up)].iloc[0]['value'],
+                          df[(df['CGMES.regionName'] == down)].iloc[0]['value'])
+
+            # If sign of p_up is positive, then flow is according to the direction of cross_border(e.g. LT-LV)
+            direction = sign(p_up)
+            p = min(abs(p_up), abs(p_down)) * direction
+            i_loading = i / i_limit
+
+            # Gets voltage and it's limits
+            v = max(df['v_mag'])  # gets maximum V from both nodes (for limits)
+            v_min = min(df['low_voltage_limit'])  # gets minimum voltage value
+            v_max = max(df['high_voltage_limit'])  # gets maximum voltage value
+
+            if logger_output:
+                logger.info(
+                    f"\t\tThe CGMES.regionName taken for p_up is "
+                    f"{df[(df['CGMES.regionName'] == up)].iloc[0]['CGMES.regionName']}")
+
+        except IndexError:
+            p = nan
+            i = nan
+            i_limit = nan
+            i_loading = nan
+            v = nan
+            v_min = nan
+            v_max = nan
+            logger.warning(f"\tLine {line_name} was not found in region {down}")
+
+        status = dangling_lines.loc[dangling_lines['ucte_xnode_code'] == node, 'connected']
+
+        # checks if filtered dataframe has nan
+        if not isnan(p):
+            p_list.append(p)
+            if not isnan(i) or isnan(i_limit):
+                i_list.append(i)
+                i_limit_list.append(i_limit)
+
+            if logger_output:
+                logger.info(f"\t\tLine {line_name} "
+                            f"P = {round(p, 2)} MW | "
+                            f"i_loading = {round(i_loading, 2)} % "
+                            f"V = {round(v, 2)} kV | "
+                            f"V_max_limit = {round(v_max,2)} kV | "
+                            f"V_min_limit = {round(v_min, 2)} kV")
+        else:
+            p_list.append(0)
+            if logger_output:
+                try:
+                    logger.error(f"\t\tLine {line_name} was not computed. Connection status of line nodes: "
+                                 f"{status.iat[0], status.iat[1]}")
+                except IndexError:
+                    logger.error(f" One of the line nodes is missing")
+                    logger.error(f"\t\tLine {line_name} was not computed")
+
+    # Gets sum of all Xborder lines
+    x_border_flow = sum(p_list)
+    x_border_flow = direction_check_hvdc(cross_border=cross_border, xborder_flow=x_border_flow)
+
+    sum_i = sum(i_list)
+    sum_i_limit = sum(i_limit_list)
+    try:
+        x_border_limit = sum_i / sum_i_limit
+    except ZeroDivisionError:
+        x_border_limit = nan
+
+    if logger_output:
+        logger.info(f"\t\tCross-border flow is {round(x_border_flow, 2)} MW")
+        logger.info(f"\t\tCross-border capacity limit is {round(x_border_limit, 2)} %")
+
+        direction = sign(x_border_flow)
+        up_dir, down_dir = cross_border.split('-')
+        if direction >= 0:
+            logger.info(f"\t\tFlow direction is {up_dir}-{down_dir}")
+        else:
+            logger.info(f"\t\tFlow direction is {down_dir}-{up_dir}")
+
+    border_flows = pd.DataFrame(p_list, index=line_names, columns=['P_MW'])
+
+    return x_border_flow, x_border_limit, border_flows
