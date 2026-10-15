@@ -187,8 +187,7 @@ class OutagePlanIncompatibilityAssessment:
                 Outage(**{k: v for k,v in row.items() if k in params}) for row in response.to_dict(orient="records")
             ]
         else:
-            logger.warning(f"No UAP outages found in '{index}' for merge type {merge_type_list} between {filter_time} and {now}")
-            outage_list = None
+            raise ValueError(f"No UAP batch found in '{index}' for merge type {merge_type_list} between {filter_time} and {now}")
 
         self.uap_outages = outage_list
 
@@ -322,6 +321,9 @@ class OutagePlanIncompatibilityAssessment:
         self.confirmed_outages = self.crosschecked_element_df[self.crosschecked_element_df['outage_in_uap']]
         self.model_outages = self.crosschecked_element_df[self.crosschecked_element_df['outage_in_cgm']]
         self.outages_to_reconnect = self.crosschecked_element_df[~self.crosschecked_element_df['outage_in_uap']]
+        if not self.reconnect_outages:
+            logger.info("RECONNECT_OUTAGES is off, reconnecting only OUTAGE_ENABLE elements")
+            self.outages_to_reconnect = self.outages_to_reconnect.iloc[0:0]
 
         # Update outage lists according to manual inputs
         mask1 = self.crosschecked_element_df[list(self.outage_corrections['to_enable'])].isin(self.outage_corrections['to_enable']).any(axis=1)
@@ -341,7 +343,7 @@ class OutagePlanIncompatibilityAssessment:
 
         changed_outage_list = []
         # Reconnecting relevant outages
-        if self.reconnect_outages:
+        if not self.outages_to_reconnect.empty:
             logger.info(f"Reconnecting outages to network instance: '{outage_configuration_id}'")
             for index, outage in self.outages_to_reconnect.iterrows():
                 if outage.type != 'transformer' and outage.area != 'PL' and pd.notna(outage.equipment):
