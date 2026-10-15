@@ -113,6 +113,9 @@ def get_opi_timestamps(iso_offset: str, timestamps_per_day: list, time_horizon: 
         from opi.configs.opi.opi_yr_criteria import opi_yr_ct_properties
         from opi.shared.data_functions import query_elk_uap
         outage_df = query_elk_uap(time_horizon=time_horizon, run_time_offset=iso_offset, filter_range='-P10W')
+        if outage_df.empty:
+            logger.error("No Y-1 UAP outages found, critical timestamps not calculated")
+            return []
         critical_timestamps = calculate_critical_timestamps(outage_df, opi_yr_ct_properties)
     else:
         critical_timestamps = None

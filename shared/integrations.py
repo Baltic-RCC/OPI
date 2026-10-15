@@ -130,12 +130,17 @@ def send_excel_to_minio(excel_file, time_horizon):
 
 
 def get_all_minio_objects(bucket, folder):
-    response = minio_service.list_objects(bucket_name=bucket, prefix=folder)
-    file_list = [item.object_name for item in response]
-    object_data = download_models_from_minio(minio_bucket=bucket, minio_folder=file_list)
-    ts_list = [datetime.strptime(t.split('/')[-1].split('.')[0][11:].split('Z')[0], "%Y%m%dT%H%M") for t in file_list]
-    name_list = [t.split('/')[-1] for t in file_list]
-    objects = [{"@scenario_timestamp": ts, "DATA": data, "name": name} for ts, data, name in zip(ts_list, object_data, name_list)]
+    """Lists objects in folder with the scenario time from their name, without downloading; other names are skipped."""
+    objects = []
+    for item in minio_service.list_objects(bucket_name=bucket, prefix=folder):
+        name = item.object_name.split('/')[-1]
+        try:
+            ts = datetime.strptime(name.split('.')[0][11:].split('Z')[0], "%Y%m%dT%H%M")
+        except ValueError:
+            logger.warning(f"Skipping MinIO object with unexpected name: {item.object_name}")
+            continue
+        objects.append({"@scenario_timestamp": ts, "name": name, "object_name": item.object_name,
+                        "last_modified": item.last_modified})
     return objects
 
 
