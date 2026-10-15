@@ -309,7 +309,7 @@ class OutagePlanIncompatibilityAssessment:
         mask1 = self.crosschecked_element_df[list(self.outage_corrections['to_enable'])].isin(self.outage_corrections['to_enable']).any(axis=1)
         self.outages_to_reconnect = pd.concat([self.outages_to_reconnect, self.crosschecked_element_df[mask1]])
         mask2 = self.crosschecked_element_df[list(self.outage_corrections['to_disable'])].isin(self.outage_corrections['to_disable']).any(axis=1)
-        self.confirmed_outages = pd.concat([self.confirmed_outages, self.crosschecked_element_df[mask2]])
+        self.confirmed_outages = pd.concat([self.confirmed_outages, self.crosschecked_element_df[mask2]]).drop_duplicates('equipment')
         # Manual corrections override UAP and model state
         enabled = self.crosschecked_element_df.loc[mask1, 'equipment']
         disabled = self.crosschecked_element_df.loc[mask2, 'equipment']
@@ -352,7 +352,7 @@ class OutagePlanIncompatibilityAssessment:
                             changed_outage_list.append(outage)
 
                     except Exception as e:
-                        logger.error((e, outage.name))
+                        logger.error(f"Failed to reconnect {outage['name']} {outage.equipment}: {e}")
                         continue
 
         # Disconnect confirmed outages
@@ -387,7 +387,7 @@ class OutagePlanIncompatibilityAssessment:
                     else:
                         logger.error(f"Failed to disconnect: {outage['name']} {outage.equipment}")
             except Exception as e:
-                logger.error(e)
+                logger.error(f"Failed to disconnect {outage['name']} {outage.equipment}: {e}")
                 continue
 
         # Run security assessment scenario
@@ -456,11 +456,11 @@ class OutagePlanIncompatibilityAssessment:
             model_buffer.seek(0)
             model_buffer.name = (f"{folder}/{self.time_horizon}/"
                                  f"{pd.Timestamp(self.scenario_timestamp):%Y%m%d}/"
-                                 f"{self.model_meta['name']}_v{self.task_version}.zip")
+                                 f"{self.model_meta['name'].removesuffix('.zip')}_v{self.task_version}.zip")
             minio_service.upload_object(file_path_or_file_object=model_buffer, bucket_name=bucket)
             logger.info(f"OPI model saved to MinIO: {bucket}/{model_buffer.name}")
         except Exception as error:
-            logger.error(f"OPI model export to MinIO failed: {error}")
+            logger.exception(f"OPI model export to MinIO failed: {error!r}")
         finally:
             network.set_working_variant('InitialState')
 
