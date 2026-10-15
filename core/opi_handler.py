@@ -80,7 +80,8 @@ class HandlerRunOpi:
                 if not opi_service.send_results_to_elk():
                     raise RuntimeError(f"Sending results to ELK failed, timestamp {task['scenario_timestamp']}")
 
-            logger.info(f"{opi_service.scenario_timestamp} OPI calculation finished")
+            if not sa_diverged:
+                logger.info(f"{opi_service.scenario_timestamp} OPI calculation finished")
 
         if sa_diverged:
             raise RuntimeError(f"Security analysis diverged, no OPI results for timestamp {task['scenario_timestamp']}")
