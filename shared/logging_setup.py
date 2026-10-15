@@ -38,3 +38,5 @@ def add_elk_handler(elk_server: str, elk_api_key: str, index: str = "opi-logs") 
     elk_handler = elk_logger.ElkLoggingHandler(elk_server=elk_server, index=index, api_key=elk_api_key)
     if elk_handler.connected:
         logging.getLogger().addHandler(elk_handler)
+    else:
+        logging.getLogger(__name__).warning(f"ELK log handler not connected to '{elk_server}', logs not sent to '{index}'")

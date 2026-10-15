@@ -8,6 +8,7 @@ from opi.shared.logging_setup import setup_logging
 import opi.configs as config
 import pandas as pd
 import logging
+import sys
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ timestamp_list = [ts.isoformat() for ts in timestamps]
 full_results = []
 for ts, timestamp in zip(timestamps, timestamp_list):
     # Latest version per timestamp, a rerun may cover only some timestamps
-    if RESULT_VERSION.lower() == 'latest':
+    if RESULT_VERSION.strip().lower() in ('', 'latest'):
         version = set_task_version(timestamps=[ts], time_horizon=TIME_HORIZON) - 1
     else:
         version = int(RESULT_VERSION)
@@ -113,6 +114,9 @@ for ts, timestamp in zip(timestamps, timestamp_list):
     full_results.append(result_list)
 
 full_results = [x for x in full_results if x != []]
+if not full_results:
+    logger.error(f"No OPI results found for {time_horizon} timestamps {timestamp_list}, report not created")
+    sys.exit(1)
 result_tuple = (full_results, index_list)
 
 excel_data = opi_results_to_excel(results=result_tuple, time_horizon=time_horizon, year=opi_year, export_locally=False)

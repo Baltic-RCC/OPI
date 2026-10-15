@@ -1,6 +1,7 @@
 import sys
 import json
 import logging
+import contextvars
 import opi.configs as config
 from opi.shared.opi_functions import get_opi_timestamps, get_input_dir, get_uap_offset_time, get_opi_year
 from opi.shared.data_functions import set_task_version, set_outage_corrections
@@ -10,11 +11,14 @@ from opi.shared.logging_setup import setup_logging, add_elk_handler
 import pypowsybl as pp
 
 setup_logging()
-parse_app_properties(caller_globals=globals(), path=config.paths.task_generator.task)
 parse_app_properties(caller_globals=globals(), path=config.paths.integrations.elastic)
 add_elk_handler(elk_server=ELK_SERVER, elk_api_key=ELK_API_KEY, index='opi-logs')
+# Parsed after the ELK handler is added, so the run config echo reaches opi-logs
+parse_app_properties(caller_globals=globals(), path=config.paths.task_generator.task)
 
 logger = logging.getLogger(__name__)
+# Uncaught errors, e.g. in the run preparation below, are logged (also to opi-logs); exit code stays 1
+sys.excepthook = lambda *exc_info: logger.critical("OPI run failed", exc_info=exc_info)
 logger.info(f"pypowsybl {pp.__version__}")
 
 
@@ -60,10 +64,12 @@ logger.info(f"OPI run: {TIME_HORIZON}, version {task_version}, {len(tasks)} time
 failed = []
 for number, task in enumerate(tasks, start=1):
     logger.info(f"OPI task {number}/{len(tasks)} starting: {TIME_HORIZON} {task['scenario_timestamp']} v{task_version}")
+    # Own context per task: its log metadata does not leak into the next task or the run summary
+    task_context = contextvars.copy_context()
     try:
-        HandlerRunOpi().handle(task)
+        task_context.run(HandlerRunOpi().handle, task)
     except Exception as e:
-        logger.exception(f"OPI task {number}/{len(tasks)} failed: {task['scenario_timestamp']}: {e}")
+        task_context.run(logger.exception, f"OPI task {number}/{len(tasks)} failed: {task['scenario_timestamp']}: {e}")
         failed.append(task['scenario_timestamp'])
 
 logger.info(f"OPI run finished: {len(tasks) - len(failed)}/{len(tasks)} timestamp(s) succeeded"
