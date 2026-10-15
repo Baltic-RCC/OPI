@@ -197,12 +197,17 @@ class OutagePlanIncompatibilityAssessment:
 
         # Get all models in the Y-1 folder then filter out the closest one to scenario timestamp
         if self.import_minio_models and self.time_horizon == 'YR':
-            minio_models = get_all_minio_objects(
-                bucket=f'opde-confidential-analyses',
-                folder=f'OPI/inputs/Y-1/YR_models/{self.opi_year}/')
+            bucket, folder = 'opde-confidential-analyses', f'OPI/inputs/Y-1/YR_models/{self.opi_year}/'
+            minio_models = get_all_minio_objects(bucket=bucket, folder=folder)
             model_timestamp = datetime.strptime(get_yr_model_timestamp(self.scenario_timestamp), "%Y-%m-%d").date()
-            model = next((item for item in minio_models if item["@scenario_timestamp"].date() == model_timestamp), None)
-            model_data = [model.pop('DATA')]
+            matches = [item for item in minio_models if item["@scenario_timestamp"].date() == model_timestamp]
+            if not matches:
+                raise ValueError(f"Y-1 model for {model_timestamp} not found in {bucket}/{folder}")
+            model = max(matches, key=lambda item: item['last_modified'])
+            if len(matches) > 1:
+                logger.warning(f"{len(matches)} Y-1 models for {model_timestamp}, using latest uploaded: {model['name']}")
+            model_data = download_models_from_minio(minio_bucket=bucket, minio_folder=[model['object_name']])
+            logger.info(f"Model retrieved: {model['name']}")
 
         else:
             query = {

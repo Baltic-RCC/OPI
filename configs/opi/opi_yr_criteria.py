@@ -12,9 +12,9 @@ opi_yr_ct_properties = {
     'Unavailable_generation_limit': GENERATION_LIMIT,}
 
 intervals = [
-                (f'{OPI_YEAR}-01-01', f'{OPI_YEAR}-02-28', f'{OPI_YEAR}-01-21'),
-                (f'{OPI_YEAR}-03-01', f'{OPI_YEAR}-05-31', f'{OPI_YEAR}-04-15'),
-                (f'{OPI_YEAR}-06-01', f'{OPI_YEAR}-08-31', f'{OPI_YEAR}-07-15'),
-                (f'{OPI_YEAR}-09-01', f'{OPI_YEAR}-11-30', f'{OPI_YEAR}-10-21'),
-                (f'{OPI_YEAR}-12-01', f'{OPI_YEAR}-12-31', f'{OPI_YEAR}-12-16'),
+                (f'{OPI_YEAR}-01-01', f'{OPI_YEAR}-02-28', f'{OPI_YEAR}-01-20'),
+                (f'{OPI_YEAR}-03-01', f'{OPI_YEAR}-05-31', f'{OPI_YEAR}-04-21'),
+                (f'{OPI_YEAR}-06-01', f'{OPI_YEAR}-08-31', f'{OPI_YEAR}-07-21'),
+                (f'{OPI_YEAR}-09-01', f'{OPI_YEAR}-11-30', f'{OPI_YEAR}-10-20'),
+                (f'{OPI_YEAR}-12-01', f'{OPI_YEAR}-12-31', f'{OPI_YEAR}-12-15'),
             ]
