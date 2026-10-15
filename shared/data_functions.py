@@ -126,7 +126,8 @@ def send_opi_results_to_elk(results: dict, time_horizon: str, timestamp: str):
 
 def set_task_version(timestamps, time_horizon: str, set_version: str = None):
 
-    if set_version == "" or set_version == "LATEST" or set_version is None:
+    set_version = str(set_version or "").strip()
+    if set_version.upper() in ("", "LATEST"):
         timestamp_list = [ts.isoformat() for ts in timestamps]
         query = {"bool": {"must": [{"exists": {"field": "@version"}},
                                    {"terms": {"@scenario_timestamp": timestamp_list}},

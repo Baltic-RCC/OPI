@@ -237,6 +237,15 @@ def get_opi_week_number(timestamp: pd.Timestamp) -> str:
     return str(week_number)
 
 
+def get_result_opi_year(timestamp: datetime.datetime, time_horizon: str, task_opi_year: str) -> str:
+    """opi_year for results and logs; W-1 weeks 52/53 dated in January stay in the previous year."""
+    if time_horizon == "WK":
+        if get_opi_week_number(timestamp) in ['52', '53'] and timestamp.month == 1:
+            return str(timestamp.year - 1)
+        return str(timestamp.year)
+    return task_opi_year
+
+
 def format_numbers(worksheet: Worksheet):
     for row in worksheet.iter_rows():
         for cell in row:
@@ -264,7 +273,7 @@ def opi_results_to_excel(results: tuple, time_horizon: str = '', year='', export
 
     # Add all the sheet timestamps
     for i, timestamp_results in enumerate(merged_results):
-        timestamp = pd.to_datetime(timestamp_results[0]['@scenario_timestamp']).iloc[0].strftime("%m-%d")
+        timestamp = pd.to_datetime(timestamp_results[1]['@scenario_timestamp']).iloc[1].strftime("%m-%d")
 
         if f"{timestamp} Base Case Data" not in workbook.sheetnames:
             logger.info(f"Creating result sheets for {timestamp}")

@@ -33,7 +33,7 @@ def run_outage_crosscheck(network: pp.network,
     Returns:
         DataFrame with assessment results including inconsistency flags.
     """
-    outages_df = pd.DataFrame([vars(out) for out in outages or []])
+    outages_df = pd.DataFrame([vars(out) for out in outages])
     if not isinstance(element_df, pd.DataFrame) or element_df.empty:
          logger.error("Input element_df is invalid or empty.")
          return pd.DataFrame() # Return empty DataFrame
@@ -72,9 +72,6 @@ def run_outage_crosscheck(network: pp.network,
 
     # Map relevant outages to grid IDs using the filtered element list
     mapped_uap_outage_ids = get_outage_grid_id(relevant_outages_df, element_df_filtered, contingency_list)
-    # PL elements stay as modelled by design
-    pl_ids = element_df.loc[element_df['secured_for_region'] == 'PL', 'grid_element_id'].astype(str)
-    mapped_uap_outage_ids = mapped_uap_outage_ids[~mapped_uap_outage_ids.isin(pl_ids)]
 
     # Pass the filtered element list and mapped IDs to the assessment function
     result_assessment_df = outage_assessment(network, element_df_filtered, mapped_uap_outage_ids)
@@ -124,14 +121,14 @@ def get_relevant_outages(outages_df: pd.DataFrame, model_scenario_time: datetime
 def get_outage_grid_id(relevant_outages_df: pd.DataFrame, element_df: pd.DataFrame, contingency_list: list) -> pd.Series:
     """Maps relevant outages EICs to grid element IDs using the element DataFrame."""
 
-    if relevant_outages_df is None or relevant_outages_df.empty:
-        logger.info("No relevant outages to map.")
-        return pd.Series(dtype=str) # Return empty Series
-
     # TODO hack solution until Litgrid fixes eic in OPC tool
     #  this should not cause issues even after eic change
     relevant_outages_df['eic'] = relevant_outages_df['eic'].replace('41TKRUONIOHAE32Q', '41T9472798283LN-')
-    relevant_outages_df = relevant_outages_df[~relevant_outages_df['name'].str.contains("LitPol Link BTB", na=False)]
+    relevant_outages_df = relevant_outages_df[~relevant_outages_df['name'].str.contains("LitPol Link BTB")]
+
+    if relevant_outages_df is None or relevant_outages_df.empty:
+        logger.info("No relevant outages to map.")
+        return pd.Series(dtype=str) # Return empty Series
 
     # Input Validation
     if not isinstance(relevant_outages_df, pd.DataFrame):
@@ -165,9 +162,6 @@ def get_outage_grid_id(relevant_outages_df: pd.DataFrame, element_df: pd.DataFra
         eic_map = [{'eic': item.eq_eic, 'grid_element_id': item.equipment[0]} for item in contingency_list]
         element_map_df = element_df[['eic', 'grid_element_id']].drop_duplicates()
         element_map_df = pd.concat([element_map_df, pd.DataFrame(eic_map)]).drop_duplicates()
-        # Null keys would match every outage without EIC
-        element_map_df = element_map_df[element_map_df['eic'].notna() & (element_map_df['eic'] != '')
-                                        & element_map_df['grid_element_id'].notna()]
         merged_df = outage_df_filtered.merge(
             element_map_df,
             on='eic',
@@ -199,8 +193,8 @@ def get_outage_grid_id(relevant_outages_df: pd.DataFrame, element_df: pd.DataFra
         return unique_grid_ids.reset_index(drop=True)
 
     except Exception as e:
-        logger.error(f"Error during outage grid ID mapping: {e}", exc_info=True)
-        return pd.Series(dtype=str) # Return empty on error
+        logger.error(f"Error during outage grid ID mapping: {e}")
+        raise
 
 
 def outage_assessment(network: pp.network,
@@ -234,7 +228,6 @@ def outage_assessment(network: pp.network,
 
     # Get model outages (CGM)
     model_outage_id = pd.Series(dtype=str) # Default empty
-    elements = pd.DataFrame()
     # Get unique, non-null IDs from the current view being assessed
     all_ids_in_view = assessment_df['grid_element_id'].dropna().unique().tolist()
     for item in uap_outage_ids:
@@ -270,16 +263,12 @@ def outage_assessment(network: pp.network,
             logger.error(f"Error getting/processing network elements for CGM check: {e}", exc_info=True)
             # Keep model_outage_id as empty Series
 
-    # UAP outages mapped to elements outside the assessed element list (contingency-only, mRID-only, generators)
-    if not elements.empty:
-        additional_elements = elements[elements.index.isin(uap_outage_ids)
-                                       & ~elements.index.isin(assessment_df['grid_element_id'])].reset_index()
-        additional_elements = additional_elements.rename(columns={'id': 'grid_element_id'})[['grid_element_id', 'name']]
-        additional_elements['outage_in_uap'] = True
-        if not additional_elements.empty:
-            logger.info(f"Applying {len(additional_elements)} UAP outage(s) outside the assessed element list: "
-                        f"{additional_elements['name'].tolist()}")
-            assessment_df = pd.concat([assessment_df, additional_elements])
+    # TODO rework for more permanent fix
+    additional_elements = elements[(elements.index.isin(uap_outage_ids)) & (elements['type'] == 'GENERATOR')].reset_index()
+    additional_elements = additional_elements.rename(columns={'id': 'grid_element_id'})[['grid_element_id', 'name']]
+    additional_elements['outage_in_uap'] = True
+
+    assessment_df = pd.concat([assessment_df, additional_elements])
 
     # Add CGM outage flag
     assessment_df['outage_in_cgm'] = assessment_df['grid_element_id'].isin(model_outage_id)

@@ -4,9 +4,13 @@ from opi.shared.integrations import get_docs_by_query
 from opi.shared.opi_functions import get_opi_timestamps, get_opi_year
 from opi.shared.config_parser import parse_app_properties
 from opi.shared.data_functions import set_task_version
+from opi.shared.logging_setup import setup_logging
 import opi.configs as config
 import pandas as pd
+import logging
 
+setup_logging()
+logger = logging.getLogger(__name__)
 parse_app_properties(caller_globals=globals(), path=config.paths.opi.report_generator)
 
 index_list = ["system-balance", "confirmed-outages", "border-flows",
@@ -26,16 +30,15 @@ time_horizon = TIME_HORIZON
 timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
                                 time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
 opi_year = get_opi_year(timestamps)
-if RESULT_VERSION.lower() != 'latest':
+if RESULT_VERSION.lower() == 'latest':
+    version = set_task_version(timestamps=timestamps, time_horizon=TIME_HORIZON) - 1
+else:
     version = int(RESULT_VERSION)
 
 timestamp_list = [ts.isoformat() for ts in timestamps]
 
 full_results = []
 for timestamp in timestamp_list:
-    # Latest version per timestamp, so a partial re-run does not hide the other timestamps
-    if RESULT_VERSION.lower() == 'latest':
-        version = set_task_version(timestamps=[pd.Timestamp(timestamp)], time_horizon=TIME_HORIZON) - 1
     result_list = []
     for index in index_list:
         if index in ["bus-results", "branch-results"]:
@@ -53,6 +56,7 @@ for timestamp in timestamp_list:
             ]}}
         elk_df = get_docs_by_query(index=f"opi-{index}*", query=query, size=10000)
         if elk_df.empty and index == 'system-balance':
+            logger.warning(f"No results for {timestamp} ({time_horizon}, version {version}), not in report")
             break
         elk_df.drop(columns=list(ignore_columns), errors='ignore', inplace=True)
         if index != "violations":
