@@ -4,7 +4,6 @@ import pandas as pd
 from pathlib import Path
 from opi.shared.opi_functions import assessed_elements_from_dataframe, contingencies_from_dataframe
 import logging
-import isodate
 import inspect
 from opi.shared.outage_class import Outage
 from io import BytesIO
@@ -12,14 +11,14 @@ from datetime import timezone
 from opi.shared.loadflow import load_network
 from loadflow_engine.security_analysis import SecurityAnalysis
 from opi.configs.opi import opi_lf_parameters
-from opi.shared.opi_functions import get_yr_model_timestamp
+from opi.shared.opi_functions import select_yr_models
 from opi.shared.outage_crosscheck import run_outage_crosscheck
 from opi.shared.outage_crosscheck import get_relevant_outages
 from opi.shared.process_results import get_system_balance, get_ba_cross_border_flows
 import pypowsybl as pp
 import zipfile
-from opi.shared.integrations import (get_all_minio_objects, query_data, download_models_from_minio, get_docs_by_query,
-                                     get_lf_settings_manager, minio_service)
+from opi.shared.integrations import (get_all_minio_objects, query_data, download_models_from_minio,
+                                     get_lf_settings_manager, minio_service, OPI_MODEL_BUCKET, OPI_MODEL_FOLDER)
 
 logger = logging.getLogger(__name__)
 
@@ -150,44 +149,19 @@ class OutagePlanIncompatibilityAssessment:
 
 
     def get_elk_uap(self, index):
-        logger.info(f"Retrieving outages from ELK index: '{index}'")
 
-        # now represents the time of the run, in P0W case it should be current time
-        now = datetime.now() + isodate.parse_duration(self.run_time_offset)
-        filter_time = (now + isodate.parse_duration(self.uap_query_offset)).strftime("%Y-%m-%dT%H:%M") + "Z"
-        now = now.strftime("%Y-%m-%dT%H:%M") + "Z"
+        from opi.shared.data_functions import query_elk_uap
 
-        if self.time_horizon == 'WK':
-            merge_type_list = ['week']
-        elif self.time_horizon == 'MO':
-            merge_type_list = ['week', 'month']
-        elif self.time_horizon == 'YR':
-            merge_type_list = ['year']
+        response = query_elk_uap(time_horizon=self.time_horizon, run_time_offset=self.run_time_offset,
+                                 uap_query_offset=self.uap_query_offset, index=index)
+        if response is None:
+            raise ValueError(f"No UAP batch found in '{index}' for timestamp {self.scenario_timestamp}")
+        response = response[response['asset_type'] != 'PROD']
 
-        query = {
-            "bool": {
-                "must": [
-                    {"exists": {"field": "name"}},
-                    {"terms": {"Merge": merge_type_list}},
-                ],
-                "filter": [{"range": {"reportParsedDate": {"lte": now, "gte": filter_time}}}],
-            }
-        }
-        response = get_docs_by_query(index=index, query=query, size=10000, return_df=True)
-
-        if not response.empty:
-            # Get only latest report data
-            response['reportParsedDate'] = pd.to_datetime(response['reportParsedDate'])
-            response = response[response['reportParsedDate'] == response['reportParsedDate'].max()]
-            response = response[response['outage_type'].isin(['OUT', 'SSS'])]
-            response = response[response['asset_type'] != 'PROD']
-
-            params = inspect.signature(Outage).parameters
-            outage_list = [
-                Outage(**{k: v for k,v in row.items() if k in params}) for row in response.to_dict(orient="records")
-            ]
-        else:
-            raise ValueError(f"No UAP batch found in '{index}' for merge type {merge_type_list} between {filter_time} and {now}")
+        params = inspect.signature(Outage).parameters
+        outage_list = [
+            Outage(**{k: v for k,v in row.items() if k in params}) for row in response.to_dict(orient="records")
+        ]
 
         self.uap_outages = outage_list
 
@@ -195,17 +169,16 @@ class OutagePlanIncompatibilityAssessment:
     def get_opi_model(self):
         logger.info("Retrieving model")
 
-        # Get all models in the Y-1 folder then filter out the closest one to scenario timestamp
+        # Y-1 fallback: model of the timestamp's season from the MinIO folder
         if self.import_minio_models and self.time_horizon == 'YR':
-            bucket, folder = 'opde-confidential-analyses', f'OPI/inputs/Y-1/YR_models/{self.opi_year}/'
-            minio_models = get_all_minio_objects(bucket=bucket, folder=folder)
-            model_timestamp = datetime.strptime(get_yr_model_timestamp(self.scenario_timestamp), "%Y-%m-%d").date()
-            matches = [item for item in minio_models if item["@scenario_timestamp"].date() == model_timestamp]
+            bucket, folder = OPI_MODEL_BUCKET, f'{OPI_MODEL_FOLDER}/{self.opi_year}/'
+            matches = select_yr_models(get_all_minio_objects(bucket=bucket, folder=folder), self.scenario_timestamp)
             if not matches:
-                raise ValueError(f"Y-1 model for {model_timestamp} not found in {bucket}/{folder}")
+                raise ValueError(f"Y-1 model for {self.scenario_timestamp} not found in {bucket}/{folder}")
             model = max(matches, key=lambda item: item['last_modified'])
             if len(matches) > 1:
-                logger.warning(f"{len(matches)} Y-1 models for {model_timestamp}, using latest uploaded: {model['name']}")
+                logger.warning(f"{len(matches)} Y-1 models for {model['@scenario_timestamp']}, "
+                               f"using latest uploaded: {model['name']}")
             model_data = download_models_from_minio(minio_bucket=bucket, minio_folder=[model['object_name']])
             logger.info(f"Model retrieved: {model['name']}")
 
@@ -216,11 +189,13 @@ class OutagePlanIncompatibilityAssessment:
                 "@scenario_timestamp": self.scenario_timestamp,
             }
 
+            # Y-1: BA YR merges of the timestamp's season, the one nearest to the timestamp
             if self.time_horizon == 'YR':
-                model_timestamp = get_yr_model_timestamp(self.scenario_timestamp)
-                query['@scenario_timestamp'] = model_timestamp
+                del query['@scenario_timestamp']
 
             model_meta = query_data(query, query_filter=None, return_payload=False, scroll=None)
+            if self.time_horizon == 'YR':
+                model_meta = select_yr_models(model_meta, self.scenario_timestamp)
 
             if model_meta:
                 version = self.model_version.lower()
@@ -334,7 +309,7 @@ class OutagePlanIncompatibilityAssessment:
         mask1 = self.crosschecked_element_df[list(self.outage_corrections['to_enable'])].isin(self.outage_corrections['to_enable']).any(axis=1)
         self.outages_to_reconnect = pd.concat([self.outages_to_reconnect, self.crosschecked_element_df[mask1]])
         mask2 = self.crosschecked_element_df[list(self.outage_corrections['to_disable'])].isin(self.outage_corrections['to_disable']).any(axis=1)
-        self.confirmed_outages = pd.concat([self.confirmed_outages, self.crosschecked_element_df[mask2]]).drop_duplicates('equipment')
+        self.confirmed_outages = pd.concat([self.confirmed_outages, self.crosschecked_element_df[mask2]])
         # Manual corrections override UAP and model state
         enabled = self.crosschecked_element_df.loc[mask1, 'equipment']
         disabled = self.crosschecked_element_df.loc[mask2, 'equipment']
@@ -377,7 +352,7 @@ class OutagePlanIncompatibilityAssessment:
                             changed_outage_list.append(outage)
 
                     except Exception as e:
-                        logger.error(f"Failed to reconnect {outage['name']} {outage.equipment}: {e}")
+                        logger.error((e, outage.name))
                         continue
 
         # Disconnect confirmed outages
@@ -412,7 +387,7 @@ class OutagePlanIncompatibilityAssessment:
                     else:
                         logger.error(f"Failed to disconnect: {outage['name']} {outage.equipment}")
             except Exception as e:
-                logger.error(f"Failed to disconnect {outage['name']} {outage.equipment}: {e}")
+                logger.error(e)
                 continue
 
         # Run security assessment scenario
@@ -481,11 +456,11 @@ class OutagePlanIncompatibilityAssessment:
             model_buffer.seek(0)
             model_buffer.name = (f"{folder}/{self.time_horizon}/"
                                  f"{pd.Timestamp(self.scenario_timestamp):%Y%m%d}/"
-                                 f"{self.model_meta['name'].removesuffix('.zip')}_v{self.task_version}.zip")
+                                 f"{self.model_meta['name']}_v{self.task_version}.zip")
             minio_service.upload_object(file_path_or_file_object=model_buffer, bucket_name=bucket)
             logger.info(f"OPI model saved to MinIO: {bucket}/{model_buffer.name}")
         except Exception as error:
-            logger.exception(f"OPI model export to MinIO failed: {error!r}")
+            logger.error(f"OPI model export to MinIO failed: {error}")
         finally:
             network.set_working_variant('InitialState')
 

@@ -11,10 +11,5 @@ opi_yr_ct_properties = {
     'Region_total_outages_limit': REGION_TOTAL_OUTAGES_LIMIT,
     'Unavailable_generation_limit': GENERATION_LIMIT,}
 
-intervals = [
-                (f'{OPI_YEAR}-01-01', f'{OPI_YEAR}-02-28', f'{OPI_YEAR}-01-20'),
-                (f'{OPI_YEAR}-03-01', f'{OPI_YEAR}-05-31', f'{OPI_YEAR}-04-21'),
-                (f'{OPI_YEAR}-06-01', f'{OPI_YEAR}-08-31', f'{OPI_YEAR}-07-21'),
-                (f'{OPI_YEAR}-09-01', f'{OPI_YEAR}-11-30', f'{OPI_YEAR}-10-20'),
-                (f'{OPI_YEAR}-12-01', f'{OPI_YEAR}-12-31', f'{OPI_YEAR}-12-15'),
-            ]
+# Y-1 seasons as (first month, last month); a timestamp uses the Y-1 model of its season
+seasons = [(1, 2), (3, 5), (6, 8), (9, 11), (12, 12)]

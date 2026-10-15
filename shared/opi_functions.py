@@ -9,59 +9,53 @@ from typing import List
 logger = logging.getLogger(__name__)
 
 
-def calculate_critical_timestamps(uap_df, properties):
+def calculate_critical_timestamps(uap_df: pd.DataFrame, candidates: List[pd.Timestamp],
+                                  properties: dict) -> List[pd.Timestamp]:
+    """Candidates whose active outages reach a limit; an outage set already checked in the same season is skipped."""
 
     logger.info("Calculating critical timestamps")
     # TODO check if this statement still needed or remove it
     pd.set_option('future.no_silent_downcasting', True)
 
-    year = properties['OPI_Year']
     critical_timestamps = []
+    if uap_df.empty:
+        return critical_timestamps
 
-    calendar = pd.date_range(start=pd.Timestamp(f'{year}-01-01 12:00'),
-                             end=pd.Timestamp(f'{year}-12-31 12:00'), freq='D')
-    date_outages_list = []
-    add_timestamp = True
-    for date in calendar:
-        outages = ((pd.to_datetime(uap_df['start_date']) <= date) & (pd.to_datetime(uap_df['end_date']) >= date))
-        date_outages = uap_df[outages]
+    # Outage times compared as UTC, as in the crosscheck
+    start = pd.to_datetime(uap_df['start_date'], utc=True)
+    end = pd.to_datetime(uap_df['end_date'], utc=True)
+    checked_sets = {}
+    for timestamp in candidates:
+        utc_timestamp = timestamp.tz_localize('UTC')
+        date_outages = uap_df[(start <= utc_timestamp) & (end >= utc_timestamp)]
 
-        area_tieline_count = date_outages[date_outages['asset_type'].isin(['TIE'])].groupby('Area').size().max()
-        area_line_count = date_outages[date_outages['asset_type'].isin(['LINE'])].groupby('Area').size().max()
-        region_total_line_count = (date_outages['asset_type'].isin(['TIE', 'LINE'])).sum()
-        area_outage_count = date_outages.groupby('Area').size().max()
-        region_total_outage_count = outages.sum()
-        unavailable_generation = pd.to_numeric(date_outages[(date_outages['asset_type'].isin(['GEN', 'PROD']))][
-                'Unavailable_capacity']).sum()
-        # transformer_count = (date_outages['pSRType.psrType'] == 'B24').sum()
+        # Same elements out in the same season (same model) give the same result
+        season_sets = checked_sets.setdefault(get_yr_season(timestamp), set())
+        outage_set = frozenset(date_outages['eic'].dropna())
+        if outage_set in season_sets:
+            continue
+        season_sets.add(outage_set)
 
-        # Remove duplicate outage combinations
-        if not date_outages_list:
-            date_outages_list.append(date_outages)
-        else:
-            for item in date_outages_list:
-                add_timestamp = True
-                if date_outages.equals(item):
-                    add_timestamp = False
-            if add_timestamp:
-                date_outages_list.append(date_outages)
-                add_timestamp = False
+        # Elements counted once by EIC, also when reported in several rows
+        area_tieline_count = date_outages[date_outages['asset_type'].isin(['TIE'])].groupby('Area')['eic'].nunique().max()
+        area_line_count = date_outages[date_outages['asset_type'].isin(['LINE'])].groupby('Area')['eic'].nunique().max()
+        region_total_line_count = date_outages[date_outages['asset_type'].isin(['TIE', 'LINE'])]['eic'].nunique()
+        area_outage_count = date_outages.groupby('Area')['eic'].nunique().max()
+        region_total_outage_count = date_outages['eic'].nunique()
+        generation = date_outages[date_outages['asset_type'].isin(['GEN', 'PROD'])]
+        unavailable_generation = pd.to_numeric(generation['Unavailable_capacity'], errors='coerce').groupby(
+            generation['eic']).max().sum()
 
-                # Check if new outage set can be considered critical timestamp
-                if area_tieline_count >= int(properties['Area_tieline_limit']):
-                    critical_timestamps.append(date)
-                elif area_line_count >= int(properties['Area_line_limit']):
-                    critical_timestamps.append(date)
-                elif region_total_line_count >= int(properties['Region_total_line_limit']):
-                    critical_timestamps.append(date)
-                elif area_outage_count >= int(properties['Area_outages_limit']):
-                    critical_timestamps.append(date)
-                elif region_total_outage_count >= int(properties['Region_total_outages_limit']):
-                    critical_timestamps.append(date)
-                elif unavailable_generation >= float(properties['Unavailable_generation_limit']):
-                    critical_timestamps.append(date)
+        # Check if new outage set can be considered critical timestamp
+        if (area_tieline_count >= int(properties['Area_tieline_limit'])
+                or area_line_count >= int(properties['Area_line_limit'])
+                or region_total_line_count >= int(properties['Region_total_line_limit'])
+                or area_outage_count >= int(properties['Area_outages_limit'])
+                or region_total_outage_count >= int(properties['Region_total_outages_limit'])
+                or unavailable_generation >= float(properties['Unavailable_generation_limit'])):
+            critical_timestamps.append(timestamp)
 
-    logger.info(f"OPI Y-1 timestamps: {critical_timestamps}")
+    logger.info(f"OPI Y-1 critical timestamps ({len(critical_timestamps)}): {[str(ts) for ts in critical_timestamps]}")
 
     return critical_timestamps
 
@@ -101,7 +95,8 @@ def parse_set_timestamps(timestamp_str: str, timestamps_per_day: list):
     return [pd.Timestamp(dt) for dt in timestamps]
 
 
-def get_opi_timestamps(iso_offset: str, timestamps_per_day: list, time_horizon: str, set_timestamps=None) -> List[pd.Timestamp]:
+def get_opi_timestamps(iso_offset: str, timestamps_per_day: list, time_horizon: str, set_timestamps=None,
+                       uap_query_offset: str = None) -> List[pd.Timestamp]:
     # TODO update logic to be fool proof
     if set_timestamps:
         critical_timestamps = parse_set_timestamps(set_timestamps, timestamps_per_day)
@@ -110,13 +105,7 @@ def get_opi_timestamps(iso_offset: str, timestamps_per_day: list, time_horizon: 
     elif time_horizon == 'MO':
         critical_timestamps = get_opi_1m_timestamps(iso_offset, timestamps_per_day)
     elif time_horizon == 'YR':
-        from opi.configs.opi.opi_yr_criteria import opi_yr_ct_properties
-        from opi.shared.data_functions import query_elk_uap
-        outage_df = query_elk_uap(time_horizon=time_horizon, run_time_offset=iso_offset, filter_range='-P10W')
-        if outage_df.empty:
-            logger.error("No Y-1 UAP outages found, critical timestamps not calculated")
-            return []
-        critical_timestamps = calculate_critical_timestamps(outage_df, opi_yr_ct_properties)
+        critical_timestamps = get_opi_yr_timestamps(iso_offset, timestamps_per_day, uap_query_offset)
     else:
         critical_timestamps = None
 
@@ -176,6 +165,26 @@ def get_opi_1m_timestamps(iso_duration: str, hours_per_day: list):
     return timestamps
 
 
+def get_opi_yr_timestamps(iso_offset: str, timestamps_per_day: list, uap_query_offset: str = None) -> List[pd.Timestamp]:
+    """Y-1 timestamps: critical timestamps of the target year from the latest Y-1 UAP."""
+    from opi.configs.opi.opi_yr_criteria import opi_yr_ct_properties
+    from opi.shared.data_functions import query_elk_uap
+
+    year = get_opi_yr_year(iso_offset)
+    logger.info(f"OPI Y-1 year: {year}")
+    set_hours = [time(hour=int(hour.split(':')[0]), minute=int(hour.split(':')[1])) for hour in timestamps_per_day]
+    candidates = sorted(pd.Timestamp(datetime.combine(day, h))
+                        for day in pd.date_range(f'{year}-01-01', f'{year}-12-31', freq='D').date for h in set_hours)
+
+    uap_df = query_elk_uap(time_horizon='YR', run_time_offset=iso_offset,
+                           uap_query_offset=uap_query_offset or get_uap_offset_time(None, 'YR'))
+    if uap_df is None:
+        logger.error("No Y-1 UAP batch found, timestamps not calculated")
+        return []
+
+    return calculate_critical_timestamps(uap_df, candidates, opi_yr_ct_properties)
+
+
 def get_input_dir(time_horizon: str):
 
     mapping_dict = {
@@ -206,20 +215,50 @@ def get_opi_year(timestamps: list):
 
     return opi_year
 
-def get_yr_model_timestamp(scenario_timestamp):
+def get_opi_yr_year(iso_offset: str) -> int:
+    """Y-1 target year: OPI_YEAR when set, otherwise the year after the run time (now + DATE_OFFSET)."""
+    from opi.configs.opi.opi_yr_criteria import opi_yr_ct_properties
 
-    from opi.configs.opi.opi_yr_criteria import intervals
+    if str(opi_yr_ct_properties['OPI_Year']).strip():
+        return int(opi_yr_ct_properties['OPI_Year'])
+    return (datetime.now() + isodate.parse_duration(iso_offset)).year + 1
 
-    input_date = datetime.strptime(scenario_timestamp, "%Y-%m-%dT%H:%M:%S").date()
 
-    for interval in intervals:
-        sorted_dates = [datetime.strptime(date, "%Y-%m-%d").date() for date in interval]
-        start, end, timestamp = sorted_dates[0], sorted_dates[1], sorted_dates[2]
+def get_yr_season(timestamp: datetime) -> tuple:
+    """Y-1 season of a timestamp as (year, first month, last month)."""
+    from opi.configs.opi.opi_yr_criteria import seasons
 
-        if start <= input_date <= end:
-            model_timestamp = timestamp
+    first, last = next(season for season in seasons if season[0] <= timestamp.month <= season[1])
+    return timestamp.year, first, last
 
-    return datetime.strftime(model_timestamp, "%Y-%m-%d")
+
+def select_yr_models(models: List[dict], scenario_timestamp: str) -> List[dict]:
+    """Y-1 models in the timestamp's season, only those at the scenario time nearest to the timestamp."""
+    timestamp = pd.Timestamp(scenario_timestamp)
+    season = get_yr_season(timestamp)
+    in_season = []
+    for model in models:
+        model_time = pd.Timestamp(model['@scenario_timestamp'])
+        if model_time.tzinfo is not None:
+            model_time = model_time.tz_convert(None)
+        if get_yr_season(model_time) == season:
+            in_season.append((model_time, model))
+    if not in_season:
+        logger.error(f"No Y-1 model in months {season[1]}-{season[2]} of {season[0]} for {scenario_timestamp}")
+        return []
+    nearest = min((model_time for model_time, _ in in_season), key=lambda model_time: abs(model_time - timestamp))
+
+    return [model for model_time, model in in_season if model_time == nearest]
+
+
+def get_opi_period(iso_offset: str, time_horizon: str) -> tuple:
+    """First and last day of the assessed period: next OPC week, next month or the Y-1 target year."""
+    if time_horizon == 'YR':
+        year = get_opi_yr_year(iso_offset)
+        return pd.Timestamp(f'{year}-01-01'), pd.Timestamp(f'{year}-12-31')
+    days = get_opi_timestamps(iso_offset=iso_offset, timestamps_per_day=['00:00'], time_horizon=time_horizon)
+
+    return min(days), max(days)
 
 
 def assessed_elements_from_dataframe(data: str | pd.DataFrame) -> List[AssessedElement]:

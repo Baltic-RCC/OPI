@@ -1,7 +1,7 @@
 from opi.shared.integrations import send_excel_to_minio
 from opi.shared.process_results import opi_results_to_excel
 from opi.shared.integrations import get_docs_by_query
-from opi.shared.opi_functions import get_opi_timestamps, get_opi_year
+from opi.shared.opi_functions import get_opi_timestamps, get_opi_year, get_opi_period
 from opi.shared.config_parser import parse_app_properties
 from opi.shared.data_functions import set_task_version
 from opi.shared.logging_setup import setup_logging
@@ -28,8 +28,24 @@ ignore_columns2 = {'low_voltage_limit', 'high_voltage_limit', 'nominal_v', 'limi
                    'CGMES.Terminal_Boundary', 'CGMES.TransformerEnd1', 'CGMES.TransformerEnd2', 'CGMES.TransformerEnd3'}
 ignore_columns3 = {'subject_id', 'contingency_id', '@run_id', 'limit_reduction', 'acceptable_duration'}
 time_horizon = TIME_HORIZON
-timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
-                                time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
+if SET_CRITICAL_TIMESTAMPS:
+    timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
+                                    time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
+else:
+    # Timestamps with results in the assessed period, not recalculated (Y-1 ones depend on the UAP at run time)
+    period_start, period_end = get_opi_period(iso_offset=DATE_OFFSET, time_horizon=TIME_HORIZON)
+    query = {"bool": {"filter": [
+        {"match": {"@time_horizon": time_horizon}},
+        {"range": {"@scenario_timestamp": {"gte": f"{period_start:%Y-%m-%d}T00:00:00",
+                                           "lte": f"{period_end:%Y-%m-%d}T23:59:59"}}}
+    ]}}
+    balance_df = get_docs_by_query(index="opi-system-balance*", query=query, size=10000)
+    timestamps = [] if balance_df.empty else sorted(pd.Timestamp(ts) for ts in balance_df['@scenario_timestamp'].unique())
+    logger.info(f"Report {time_horizon} {period_start:%Y-%m-%d} - {period_end:%Y-%m-%d}: "
+                f"{len(timestamps)} timestamp(s) with results")
+if not timestamps:
+    logger.error(f"No OPI results to report for {time_horizon}, exiting")
+    sys.exit(1)
 opi_year = get_opi_year(timestamps)
 
 timestamp_list = [ts.isoformat() for ts in timestamps]
@@ -37,7 +53,7 @@ timestamp_list = [ts.isoformat() for ts in timestamps]
 full_results = []
 for ts, timestamp in zip(timestamps, timestamp_list):
     # Latest version per timestamp, a rerun may cover only some timestamps
-    if RESULT_VERSION.strip().lower() in ('', 'latest'):
+    if RESULT_VERSION.lower() == 'latest':
         version = set_task_version(timestamps=[ts], time_horizon=TIME_HORIZON) - 1
     else:
         version = int(RESULT_VERSION)
@@ -114,9 +130,6 @@ for ts, timestamp in zip(timestamps, timestamp_list):
     full_results.append(result_list)
 
 full_results = [x for x in full_results if x != []]
-if not full_results:
-    logger.error(f"No OPI results found for {time_horizon} timestamps {timestamp_list}, report not created")
-    sys.exit(1)
 result_tuple = (full_results, index_list)
 
 excel_data = opi_results_to_excel(results=result_tuple, time_horizon=time_horizon, year=opi_year, export_locally=False)
