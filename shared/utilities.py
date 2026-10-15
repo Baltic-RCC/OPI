@@ -80,7 +80,7 @@ class Contingency(BaseModel):
     name: Optional[str] = ""
     type: Optional[str] = Field(default="Ordinary", validation_alias=AliasChoices("type", "Type"))
     equipment: List[str]
-    eq_eic: Optional[str]
+    eq_eic: Optional[str] = None
     #
     # @field_validator('mRID', 'equipment')
     # def validate_mrids(cls, value):

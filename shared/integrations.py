@@ -2,7 +2,6 @@ import logging
 from opi import configs
 from datetime import datetime
 from brcc_apis.elk_api import Elastic
-from rdflib.plugins.sparql.operators import datetime
 from opi.shared.config_parser import parse_app_properties
 from brcc_apis.minio_api import ObjectStorage
 from brcc_apis import settings_manager
