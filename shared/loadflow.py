@@ -99,7 +99,7 @@ def get_power_losses(network: pp.network, by_region: bool = False, present_igms:
     P_loss_line = lines['P_loss'].sum()
 
     tie_lines = get_network_elements(network=network, element_type=pp.network.ElementType.TIE_LINE)
-    dang = get_network_elements(network=network, element_type=pp.network.ElementType.DANGLING_LINE)
+    dang = get_network_elements(network=network, element_type=pp.network.ElementType.BOUNDARY_LINE)
     tie_lines_and_dang1 = tie_lines.merge(dang[['p']], left_on='dangling_line1_id', right_index=True).rename(
         columns={'p': 'p1'})
     tie_lines_and_dang1_and_dang2 = tie_lines_and_dang1.merge(dang[['p']], left_on='dangling_line2_id',
@@ -156,7 +156,7 @@ def get_xborder_flows(network, cross_border: str, logger_output: bool = True):
     line_names = CROSS_BORDER_DATA[cross_border]['LINE_NAMES']
 
     # Reading a line. Xborder lines are under dangling lines
-    dangling_no_voltage = get_network_elements(network=network, element_type=ElementType.DANGLING_LINE).reset_index()
+    dangling_no_voltage = get_network_elements(network=network, element_type=ElementType.BOUNDARY_LINE).reset_index()
     # Merges buses to determine the voltage
     buses = network.get_buses()
     dangling_lines_no_limits = dangling_no_voltage.merge(buses,

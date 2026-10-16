@@ -325,31 +325,16 @@ class OutagePlanIncompatibilityAssessment:
         # Reconnecting relevant outages
         if not self.outages_to_reconnect.empty:
             logger.info(f"Reconnecting outages to network instance: '{outage_configuration_id}'")
-            for index, outage in self.outages_to_reconnect.iterrows():
+            for index, outage in self.outages_to_reconnect.drop_duplicates('equipment').iterrows():
                 if outage.type != 'transformer' and outage.area != 'PL' and pd.notna(outage.equipment):
                     try:
-                        if self.security_service.network.connect(outage.equipment):
+                        # Closes the open switches on the shortest path to a busbar section (needs node-breaker import)
+                        if self.security_service.network.connect(outage.equipment, operate_disconnectors=True,
+                                                                 operate_fictitious=True):
                             logger.info(f" {outage['name']} {outage.equipment} reconnected")
-                            # Reconnect switches at the end of lines to ensure it's not disconnected
-                            if outage.type == 'line':
-                                line = self.security_service.network.get_lines().loc[outage.equipment]
-                                vl1 = line.voltage_level1_id
-                                vl2 = line.voltage_level2_id
-                                for vl in [vl1, vl2]:
-                                    topo = self.security_service.network.get_bus_breaker_topology(vl)
-                                    sw_df = topo.switches
-                                    for sw_id, sw in sw_df.iterrows():
-                                        if sw['open']:
-                                            self.security_service.network.close_switch(sw_id)
-                            elif outage.type == 'tieline':
-                                line = self.security_service.network.get_dangling_lines().loc[outage.equipment]
-                                vl = line.voltage_level_id
-                                topo = self.security_service.network.get_bus_breaker_topology(vl)
-                                sw_df = topo.switches
-                                for sw_id, sw in sw_df.iterrows():
-                                    if sw['open']:
-                                        self.security_service.network.close_switch(sw_id)
                             changed_outage_list.append(outage)
+                        elif outage.outage_in_cgm:
+                            logger.warning(f"Failed to reconnect {outage['name']} {outage.equipment}: no switch path to a busbar section")
 
                     except Exception as e:
                         logger.error(f"Failed to reconnect {outage['name']} {outage.equipment}: {e}")
@@ -361,24 +346,6 @@ class OutagePlanIncompatibilityAssessment:
             try:
                 if self.security_service.network.disconnect(outage.equipment):
                     logger.info(f"{outage['name']} {outage.equipment} disconnected")
-                    if outage.type == 'line':
-                        line = self.security_service.network.get_lines().loc[outage.equipment]
-                        vl1 = line.voltage_level1_id
-                        vl2 = line.voltage_level2_id
-                        for vl in [vl1, vl2]:
-                            topo = self.security_service.network.get_bus_breaker_topology(vl)
-                            sw_df = topo.switches
-                            for sw_id, sw in sw_df.iterrows():
-                                if not sw['open']:
-                                    self.security_service.network.open_switch(sw_id)
-                    elif outage.type == 'tieline':
-                        line = self.security_service.network.get_dangling_lines().loc[outage.equipment]
-                        vl = line.voltage_level_id
-                        topo = self.security_service.network.get_bus_breaker_topology(vl)
-                        sw_df = topo.switches
-                        for sw_id, sw in sw_df.iterrows():
-                            if not sw['open']:
-                                self.security_service.network.open_switch(sw_id)
                     changed_outage_list.append(outage)
 
                 else:
