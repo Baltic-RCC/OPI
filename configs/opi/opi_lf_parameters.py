@@ -3,7 +3,8 @@ import pypowsybl
 # CGMES import parameters used to load OPI models
 CGMES_IMPORT_PARAMETERS = {
     "iidm.import.cgmes.source-for-iidm-id": "rdfID",
-    "iidm.import.cgmes.import-node-breaker-as-bus-breaker": "True",
+    # Node-breaker topology lets network.connect()/disconnect() operate the element's own bay switches
+    "iidm.import.cgmes.import-node-breaker-as-bus-breaker": "False",
 }
 
 """
