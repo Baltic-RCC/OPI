@@ -1,0 +1,33 @@
+[project]
+name = "opi"
+version = "3.0.0"
+description = "Outage Planning Incompatibility (OPI) assessment for Baltic RCC Outage Planning Coordination"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "brcc-apis==1.6.0",
+    "brcc-n1-analysis==0.0.3",
+    "pypowsybl==1.16.1",
+    "pandas==2.2.3",
+    "numpy==2.0.0",
+    "openpyxl==3.1.5",
+    "isodate==0.7.2",
+    "pydantic==2.14.1",
+]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "rcc-pypi"
+url = "https://artifactory.elering.sise/artifactory/api/pypi/pssepip/simple"
+#default = true
+
+[tool.uv.workspace]
+members = ["brcc-apis"]
+
+[tool.uv]
+allow-insecure-host = ["artifactory.elering.sise"]
+concurrent-downloads = 10

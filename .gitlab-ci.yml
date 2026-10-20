@@ -1,0 +1,22 @@
+sync-with-github:
+  stage: build
+  variables:
+    GIT_STRATEGY: none
+  # Using container with trusted certificates
+  image: $ARTIFACTORY_URL/build-containers/alpine:ssh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - when: manual
+  script:
+    - export ALPINE_REPO="https://${ARTIFACTORY_URL}:443/artifactory/alpine/v3.12"
+    - |
+      cat <<EOF > /etc/apk/repositories
+      ${ALPINE_REPO}/main
+      ${ALPINE_REPO}/community
+      EOF
+    # Perform synchronization
+    - apk add --no-cache git
+    - git clone --bare https://github.com/Baltic-RCC/opi.git
+    - cd opi.git
+    - git config http.sslVerify false
+    - git push --mirror https://$USERNAME:$ACCESS_TOKEN@$REPOSITORY_URL

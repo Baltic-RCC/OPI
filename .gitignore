@@ -1,0 +1,5 @@
+.idea/
+.venv
+containers.txt
+.DS_Store
+__pycache__/
