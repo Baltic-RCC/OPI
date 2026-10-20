@@ -1,15 +1,19 @@
+import re
 import logging
 import pandas as pd
 from io import BytesIO
 import pypowsybl as pp
 from zipfile import ZipFile, ZIP_DEFLATED
+from xml.etree import ElementTree
 from pypowsybl.network import ElementType
 from loadflow_engine.helper import get_network_elements
-from opi.constants import CROSS_BORDER_DATA
-from numpy import nan, sign, isnan
+from numpy import sign, isnan
 
 
 logger = logging.getLogger(__name__)
+
+# Border label order: LT-LV, LV-EE, LT-PL, ... Lines without one of these areas are not reported
+BA_BORDER_ORDER = ['LT', 'LV', 'EE']
 
 
 def unzip_zipped_profiles(path_or_buffer: str):
@@ -137,212 +141,21 @@ def get_power_losses(network: pp.network, by_region: bool = False, present_igms:
     return round(system_power_losses, 2)
 
 
-def get_xborder_flows(network, cross_border: str, logger_output: bool = True):
-    """
-    Returns a specific cross-border's lines flows values.
-    :param network, loadflow_engine2 network instance
-    :param cross_border: str
-        A string of the cross-border.
-    :param logger_output: bool, default True.
-        True: shows a summary of the calculation in logger
-        False: does not show any logger
-    :return:
-        Pandas dataframe
-    """
-    # Extract the lists based on the cross border
-    xnodes = CROSS_BORDER_DATA[cross_border]['XNODES']
-    line_names = CROSS_BORDER_DATA[cross_border]['LINE_NAMES']
+def get_boundary_iso_codes(model_data: bytes) -> dict[str, tuple[str, str]]:
+    """Boundary node name (X-node) -> (fromEndIsoCode, toEndIsoCode), read from the boundary set in the model zip."""
+    iso_codes = {}
+    with ZipFile(BytesIO(model_data)) as model_zip:
+        for name in model_zip.namelist():
+            with ZipFile(model_zip.open(name)) as profile_zip:
+                for xml_name in profile_zip.namelist():
+                    if not re.search(r'(EQ|TP)_?BD', xml_name.upper()):
+                        continue
+                    for node in ElementTree.parse(profile_zip.open(xml_name)).getroot():
+                        fields = {child.tag.rsplit('.', 1)[-1]: child.text for child in node}
+                        if 'fromEndIsoCode' in fields:
+                            iso_codes[fields.get('name')] = (fields['fromEndIsoCode'], fields.get('toEndIsoCode'))
 
-    # Reading a line. Xborder lines are under dangling lines
-    dangling_no_voltage = get_network_elements(network=network, element_type=ElementType.BOUNDARY_LINE).reset_index()
-    # Merges buses to determine the voltage
-    buses = network.get_buses()
-    dangling_lines_no_limits = dangling_no_voltage.merge(buses,
-                                                         how='inner',
-                                                         left_on='voltage_level_id',
-                                                         right_on='voltage_level_id')
-    # Merges operational limits to get the current limit
-    # Index is element_id only in older pypowsybl, (element_id, side, type, acceptable_duration, group_name) in 1.16
-    op_limits = network.get_operational_limits().reset_index()
-    op_limits = op_limits[(op_limits['name'] == 'permanent_limit') & (op_limits['type'] == 'CURRENT')]
-    op_limits = op_limits.drop_duplicates(subset='element_id', keep='first').set_index('element_id')
-
-    dangling_lines = dangling_lines_no_limits.merge(op_limits['value'], how='left', left_on='id', right_index=True)
-
-    # Determines up and down regions
-    if 'Estonia' in network.get_substations(all_attributes=True)['CGMES.regionName'].unique():
-        up, down = cross_border_region_name_check(cross_border, ee_cgmes_region_name='Estonia')
-    else:
-        up, down = cross_border_region_name_check(cross_border)
-
-    # List for later appending
-    p_list = []
-    i_list = []
-    i_limit_list = []
-
-    if logger_output:
-        logger.info(f"Reading {cross_border} cross-border results:")
-
-    for node, line_name in zip(xnodes, line_names):
-        # sorts dangling lines for specific nodes
-        df = dangling_lines.loc[dangling_lines['ucte_xnode_code'] == node]
-
-        # Check for duplicates
-        duplicates = df[df.duplicated(subset='CGMES.regionName', keep=False)]
-        if not duplicates.empty:
-            duplicates_groups = duplicates.groupby('CGMES.regionName').size()
-            for region, count in duplicates_groups.items():
-                if logger_output:
-                    logger.warning(f"For {line_name}, {count} duplicates were found in region {region}")
-            df = df.drop_duplicates(subset='CGMES.regionName')
-
-        # Checks if line is disconnected
-        try:
-            # Determines flow direction. Minus sign means flows towards the node
-            p_up = df[(df['CGMES.regionName'] == up)].iloc[0]['p']
-            p_down = df[(df['CGMES.regionName'] == down)].iloc[0]['p']
-
-            # Determines current limit
-            i = min(df[(df['CGMES.regionName'] == up)].iloc[0]['i'],
-                    df[(df['CGMES.regionName'] == down)].iloc[0]['i'])
-            i_limit = min(df[(df['CGMES.regionName'] == up)].iloc[0]['value'],
-                          df[(df['CGMES.regionName'] == down)].iloc[0]['value'])
-
-            # If sign of p_up is positive, then flow is according to the direction of cross_border(e.g. LT-LV)
-            direction = sign(p_up)
-            p = min(abs(p_up), abs(p_down)) * direction
-            i_loading = i / i_limit
-
-            # Gets voltage and it's limits
-            v = max(df['v_mag'])  # gets maximum V from both nodes (for limits)
-            v_min = min(df['low_voltage_limit'])  # gets minimum voltage value
-            v_max = max(df['high_voltage_limit'])  # gets maximum voltage value
-
-            if logger_output:
-                logger.info(
-                    f"\t\tThe CGMES.regionName taken for p_up is "
-                    f"{df[(df['CGMES.regionName'] == up)].iloc[0]['CGMES.regionName']}")
-
-        except IndexError:
-            p = nan
-            i = nan
-            i_limit = nan
-            i_loading = nan
-            v = nan
-            v_min = nan
-            v_max = nan
-            logger.warning(f"\tLine {line_name} was not found in region {down}")
-
-        status = dangling_lines.loc[dangling_lines['ucte_xnode_code'] == node, 'connected']
-
-        # checks if filtered dataframe has nan
-        if not isnan(p):
-            p_list.append(p)
-            if not (isnan(i) or isnan(i_limit)):
-                i_list.append(i)
-                i_limit_list.append(i_limit)
-
-            if logger_output:
-                logger.info(f"\t\tLine {line_name} "
-                            f"P = {round(p, 2)} MW | "
-                            f"i_loading = {round(i_loading, 2)} % "
-                            f"V = {round(v, 2)} kV | "
-                            f"V_max_limit = {round(v_max,2)} kV | "
-                            f"V_min_limit = {round(v_min, 2)} kV")
-        else:
-            p_list.append(0)
-            if logger_output:
-                try:
-                    logger.error(f"\t\tLine {line_name} was not computed. Connection status of line nodes: "
-                                 f"{status.iat[0], status.iat[1]}")
-                except IndexError:
-                    logger.error(f" One of the line nodes is missing")
-                    logger.error(f"\t\tLine {line_name} was not computed")
-
-    # Gets sum of all Xborder lines
-    x_border_flow = sum(p_list)
-    x_border_flow = direction_check_hvdc(cross_border=cross_border, xborder_flow=x_border_flow)
-
-    sum_i = sum(i_list)
-    sum_i_limit = sum(i_limit_list)
-    try:
-        x_border_limit = sum_i / sum_i_limit
-    except ZeroDivisionError:
-        x_border_limit = nan
-
-    if logger_output:
-        logger.info(f"\t\tCross-border flow is {round(x_border_flow, 2)} MW")
-        logger.info(f"\t\tCross-border capacity limit is {round(x_border_limit, 2)} %")
-
-        direction = sign(x_border_flow)
-        up_dir, down_dir = cross_border.split('-')
-        if direction >= 0:
-            logger.info(f"\t\tFlow direction is {up_dir}-{down_dir}")
-        else:
-            logger.info(f"\t\tFlow direction is {down_dir}-{up_dir}")
-
-    border_flows = pd.DataFrame(p_list, index=line_names, columns=['P_MW'])
-
-    return x_border_flow, x_border_limit, border_flows
-
-
-def cross_border_region_name_check(border: str, ee_cgmes_region_name: str = 'EE'):
-    """
-    Redefines the cross-border areas which names are defined differently in the model e.g. EE is defined as Estonia.
-    Also used for reading results from HVDC links due to CIM modeling.
-    :param border: str
-        A cross-border e.g. 'EE-FI'
-    :param ee_cgmes_region_name: str
-        Sometimes cgmes region name can be 'EESTI'
-    :returns:
-        tuple
-            Strings where the import and export regions are separated from the cross-border string and defined to areas
-            definitions found in the model e.g. cross-border = 'EE-FI' -> up = 'Estonia', down = 'Estonia'
-            up: first area of the cross-border
-            down: second area of the cross-border
-    """
-    up, down = border.split('-')
-
-    up_map = {
-        'EE': ee_cgmes_region_name,
-        'FI': ee_cgmes_region_name,
-        'SE': 'LT'}
-
-    down_map = {
-        'EE': ee_cgmes_region_name,
-        'FI': ee_cgmes_region_name,
-        'SE': 'LT'}
-
-    if up in up_map.keys():
-        up = up_map[up]
-
-    if down in down_map.keys():
-        down = down_map[down]
-
-    return up, down
-
-
-def direction_check_hvdc(cross_border, xborder_flow):
-    """
-    Function to adjust the sign according to the naming and flow direction convention for HVDCs (if positive, flows
-    according to described cross_border.
-    E.g. If FI-EE flow is 100 MW, it flows from FI to EE, if flow is -100 MW, flows from EE to FI
-    :param cross_border: cross border
-    :param xborder_flow: calculated flow on the described cross border
-    :return:
-    """
-    border_map = {
-        'EE-FI': xborder_flow,
-        'FI-EE': xborder_flow * -1,
-        'LT-SE': xborder_flow,
-        'SE-LT': xborder_flow * -1}
-
-    if cross_border in border_map.keys():
-        flow = border_map[cross_border]
-    else:
-        flow = xborder_flow
-
-    return flow
+    return iso_codes
 
 
 def get_system_balance(network: pp.network.Network, areas: list, border_flows: pd.DataFrame) -> pd.DataFrame:
@@ -358,13 +171,8 @@ def get_system_balance(network: pp.network.Network, areas: list, border_flows: p
     for tso in areas:
         result_df.loc[tso, 'P Load MW'] = load[load['CGMES.regionName'] == tso]['p'].sum()
         result_df.loc[tso, 'P Gen MW'] = abs(generation[generation['CGMES.regionName'] == tso]['p'].sum())
-        if tso == 'EE':
-            result_df.loc[tso, 'HVDC flow'] = (border_flows[border_flows['name'].str.contains('ESTLINK1')].iloc[0]['P_MW']
-            + border_flows[border_flows['name'].str.contains('ESTLINK2')].iloc[0]['P_MW'])
-        elif tso == 'LT':
-            result_df.loc[tso, 'HVDC flow'] = border_flows[border_flows['name'].str.contains('NORDBALT')].iloc[0]['P_MW']
-        else:
-            result_df.loc[tso, 'HVDC flow'] = float(0)
+        result_df.loc[tso, 'HVDC flow'] = border_flows.loc[border_flows['hvdc'].astype(bool) &
+                                                          border_flows['Cross_border'].str.startswith(f'{tso}-'), 'P_MW'].sum()
 
         result_df.loc[tso, 'ACNP'] = (result_df.loc[tso, 'P Gen MW'] - result_df.loc[tso, 'P Load MW']
                                       - result_df.loc[tso, 'P Losses MW'] - result_df.loc[tso, 'HVDC flow'])
@@ -372,19 +180,46 @@ def get_system_balance(network: pp.network.Network, areas: list, border_flows: p
     return round(result_df, 2).reset_index(names=['area'])
 
 
-def get_ba_cross_border_flows(network: pp.network.Network, areas: list) -> pd.DataFrame:
-    result_df = pd.DataFrame()
-    cross_borders = []
-    if 'LT' in areas:
-        cross_borders.extend(['LT-PL', 'LT-LV', 'LT-SE'])
-    if 'LV' in areas:
-        cross_borders.extend(['LV-LT', 'LV-EE'])
-    if any(area in areas for area in ('Estonia', 'EE', 'EESTI')):
-        cross_borders.extend(['EE-LV', 'EE-FI'])
+def get_ba_cross_border_flows(network: pp.network.Network, model_data: bytes) -> pd.DataFrame:
+    """
+    Flows on tie lines and HVDC links of the Baltic areas, one row per X-node.
+    P_MW is positive from the first area of Cross_border to the second.
+    HVDC links are boundary lines with the CGMES import property isHvdc, their far side comes from the boundary set.
+    """
+    try:
+        iso_codes = get_boundary_iso_codes(model_data)
+    except Exception as error:
+        logger.warning(f"Boundary set iso codes not read from model: {error!r}")
+        iso_codes = {}
 
-    for border in cross_borders:
-        flow, limit, bf_df = get_xborder_flows(network, cross_border=border, logger_output=False)
-        bf_df['Cross_border'] = border
-        result_df = pd.concat([result_df, bf_df])
+    lines = network.get_elements(ElementType.BOUNDARY_LINE, all_attributes=True)
+    if 'isHvdc' not in lines.columns:
+        lines['isHvdc'] = ''
+    substations = network.get_voltage_levels()['substation_id']
+    regions = network.get_substations(all_attributes=True)['CGMES.regionName'].replace({'Estonia': 'EE', 'EESTI': 'EE'})
+    lines['area'] = lines['voltage_level_id'].map(substations).map(regions)
+    lines = lines.drop_duplicates(subset=['pairing_key', 'area'])
 
-    return result_df.reset_index(names=['name']).drop_duplicates(subset='name')
+    order = {area: i for i, area in enumerate(BA_BORDER_ORDER)}
+    rows = []
+    for xnode, halves in lines.groupby('pairing_key'):
+        halves = halves.sort_values('area', key=lambda area: area.map(order).fillna(len(order)))
+        first = halves.iloc[0]
+        if first['area'] not in order:
+            continue
+        hvdc = first['isHvdc'] == 'true'
+        if len(halves) > 1:
+            second_area = halves.iloc[1]['area']
+            p = sign(first['p']) * min(abs(first['p']), abs(halves.iloc[1]['p']))
+        elif hvdc:
+            second_area = next((iso for iso in iso_codes.get(xnode, ()) if iso != first['area']), None)
+            if second_area is None:
+                logger.warning(f"No boundary iso codes for HVDC X-node {xnode}, far side unknown")
+            p = first['p']
+        else:
+            # AC line to an area outside the model
+            continue
+        rows.append({'Cross_border': f"{first['area']}-{second_area}", 'name': first['name'],
+                     'P_MW': 0 if isnan(p) else p, 'hvdc': hvdc})
+
+    return pd.DataFrame(rows, columns=['Cross_border', 'name', 'P_MW', 'hvdc'])

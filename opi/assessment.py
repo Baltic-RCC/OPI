@@ -591,7 +591,7 @@ class OutagePlanIncompatibilityAssessment:
 
             # Security analysis does not update the network state: read from the solved outage-applied model
             self.security_service.network.set_working_variant(outage_configuration_id)
-            border_flows = get_ba_cross_border_flows(self.security_service.network, self.areas).sort_values('Cross_border')
+            border_flows = get_ba_cross_border_flows(self.security_service.network, self.model_data).sort_values('Cross_border')
             system_balance = get_system_balance(self.security_service.network, self.areas, border_flows)
             system_balance = system_balance[~system_balance['area'].str.contains('PL')]
 
