@@ -217,11 +217,11 @@ class RunInputs:
 
     @classmethod
     def load(cls, time_horizon: str, lf_settings_keys: list[str], use_local_inputs: bool, data_import_folder: str,
-             run_time_offset: str, uap_query_offset: str) -> "RunInputs":
+             uap_time: datetime, uap_query_offset: str) -> "RunInputs":
         lf_settings = {key: get_loadflow_settings(key, elk_server=ELK_SERVER) for key in lf_settings_keys}
         assessed_elements_df, contingencies_df = get_input_data(time_horizon, DATA_IMPORT_BUCKET, data_import_folder,
                                                                 use_local_inputs=use_local_inputs)
-        uap_outages = get_uap_outages(time_horizon=time_horizon, run_time_offset=run_time_offset,
+        uap_outages = get_uap_outages(time_horizon=time_horizon, uap_time=uap_time,
                                       uap_query_offset=uap_query_offset, index=ELK_UAP_INDEX)
         return cls(lf_settings, assessed_elements_df, contingencies_df, uap_outages)
 

@@ -2,11 +2,31 @@ import calendar
 import logging
 import pandas as pd
 import isodate
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 from typing import List
 from opi.outages import query_elk_uap
 
 logger = logging.getLogger(__name__)
+
+
+def get_run_time(set_run_time: str, iso_offset: str) -> datetime:
+    """Run time: RUN_TIME when set (rerun of old data), otherwise now; DATE_OFFSET added to both."""
+    run_time = datetime.fromisoformat(set_run_time.strip()) if set_run_time.strip() else datetime.now()
+    if run_time.tzinfo is not None:
+        run_time = run_time.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return run_time + isodate.parse_duration(iso_offset)
+
+
+def get_uap_time(run_time: datetime, time_horizon: str, first_timestamp: datetime) -> datetime:
+    """Time the UAP batch is taken at: the run time, or the start of the assessed period when that is earlier, so a
+    rerun of old data assesses the plan of that period, not the latest batch (which covers the coming period)."""
+    if time_horizon == 'YR':
+        period_start = datetime(first_timestamp.year, 1, 1)
+    else:
+        period_start = datetime.combine(first_timestamp.date(), time())
+
+    return min(run_time, period_start)
 
 
 def calculate_critical_timestamps(uap_df: pd.DataFrame, candidates: List[pd.Timestamp],
@@ -95,31 +115,24 @@ def parse_set_timestamps(timestamp_str: str, timestamps_per_day: list):
     return [pd.Timestamp(dt) for dt in timestamps]
 
 
-def get_opi_timestamps(iso_offset: str, timestamps_per_day: list, time_horizon: str, set_timestamps=None,
+def get_opi_timestamps(run_time: datetime, timestamps_per_day: list, time_horizon: str, set_timestamps=None,
                        uap_query_offset: str = None) -> List[pd.Timestamp]:
     # TODO update logic to be fool proof
     if set_timestamps:
         critical_timestamps = parse_set_timestamps(set_timestamps, timestamps_per_day)
     elif time_horizon == 'WK':
-        critical_timestamps = get_opi_1w_timestamps(iso_offset, timestamps_per_day)
+        critical_timestamps = get_opi_1w_timestamps(run_time, timestamps_per_day)
     elif time_horizon == 'MO':
-        critical_timestamps = get_opi_1m_timestamps(iso_offset, timestamps_per_day)
+        critical_timestamps = get_opi_1m_timestamps(run_time, timestamps_per_day)
     elif time_horizon == 'YR':
-        critical_timestamps = get_opi_yr_timestamps(iso_offset, timestamps_per_day, uap_query_offset)
+        critical_timestamps = get_opi_yr_timestamps(run_time, timestamps_per_day, uap_query_offset)
     else:
         critical_timestamps = None
 
     return critical_timestamps
 
 
-def get_opi_1w_timestamps(iso_duration: str, timestamps_per_day: list):
-
-    # Get run week
-    timehorizon_offset = isodate.parse_duration(iso_duration)
-    now = datetime.now()
-
-    # OLD Added 7 day time delta to not change existing code that calculated for run day for WK
-    run_time = now + timehorizon_offset
+def get_opi_1w_timestamps(run_time: datetime, timestamps_per_day: list):
 
     # Find upcoming Saturday
     days_until_saturday = (5 - run_time.weekday() + 7) % 7
@@ -137,12 +150,7 @@ def get_opi_1w_timestamps(iso_duration: str, timestamps_per_day: list):
     return timestamps
 
 
-def get_opi_1m_timestamps(iso_duration: str, hours_per_day: list):
-
-    # Get current date
-    timehorizon_offset = isodate.parse_duration(iso_duration)
-    now = datetime.now()
-    run_time = now + timehorizon_offset
+def get_opi_1m_timestamps(run_time: datetime, hours_per_day: list):
 
     # Find first day of upcoming month
     next_month = run_time.month % 12 + 1
@@ -165,18 +173,18 @@ def get_opi_1m_timestamps(iso_duration: str, hours_per_day: list):
     return timestamps
 
 
-def get_opi_yr_timestamps(iso_offset: str, timestamps_per_day: list, uap_query_offset: str = None) -> List[pd.Timestamp]:
+def get_opi_yr_timestamps(run_time: datetime, timestamps_per_day: list, uap_query_offset: str = None) -> List[pd.Timestamp]:
     """Y-1 timestamps: critical timestamps of the target year from the latest Y-1 UAP."""
     # Imported on first Y-1 use: its config echo then reaches opi-logs
     from config.opi.opi_yr_criteria import opi_yr_ct_properties
 
-    year = get_opi_yr_year(iso_offset)
+    year = get_opi_yr_year(run_time)
     logger.info(f"OPI Y-1 year: {year}")
     set_hours = [time(hour=int(hour.split(':')[0]), minute=int(hour.split(':')[1])) for hour in timestamps_per_day]
     candidates = sorted(pd.Timestamp(datetime.combine(day, h))
                         for day in pd.date_range(f'{year}-01-01', f'{year}-12-31', freq='D').date for h in set_hours)
 
-    uap_df = query_elk_uap(time_horizon='YR', run_time_offset=iso_offset,
+    uap_df = query_elk_uap(time_horizon='YR', uap_time=get_uap_time(run_time, 'YR', datetime(year, 1, 1)),
                            uap_query_offset=uap_query_offset or get_uap_offset_time(None, 'YR'))
     if uap_df is None:
         logger.error("No Y-1 UAP batch found, timestamps not calculated")
@@ -215,13 +223,13 @@ def get_opi_year(timestamps: list):
 
     return opi_year
 
-def get_opi_yr_year(iso_offset: str) -> int:
-    """Y-1 target year: OPI_YEAR when set, otherwise the year after the run time (now + DATE_OFFSET)."""
+def get_opi_yr_year(run_time: datetime) -> int:
+    """Y-1 target year: OPI_YEAR when set, otherwise the year after the run time."""
     from config.opi.opi_yr_criteria import opi_yr_ct_properties
 
     if str(opi_yr_ct_properties['OPI_Year']).strip():
         return int(opi_yr_ct_properties['OPI_Year'])
-    return (datetime.now() + isodate.parse_duration(iso_offset)).year + 1
+    return run_time.year + 1
 
 
 def get_yr_season(timestamp: datetime) -> tuple:
@@ -251,12 +259,12 @@ def select_yr_models(models: List[dict], scenario_timestamp: str) -> List[dict]:
     return [model for model_time, model in in_season if model_time == nearest]
 
 
-def get_opi_period(iso_offset: str, time_horizon: str) -> tuple:
+def get_opi_period(run_time: datetime, time_horizon: str) -> tuple:
     """First and last day of the assessed period: next OPC week, next month or the Y-1 target year."""
     if time_horizon == 'YR':
-        year = get_opi_yr_year(iso_offset)
+        year = get_opi_yr_year(run_time)
         return pd.Timestamp(f'{year}-01-01'), pd.Timestamp(f'{year}-12-31')
-    days = get_opi_timestamps(iso_offset=iso_offset, timestamps_per_day=['00:00'], time_horizon=time_horizon)
+    days = get_opi_timestamps(run_time=run_time, timestamps_per_day=['00:00'], time_horizon=time_horizon)
 
     return min(days), max(days)
 

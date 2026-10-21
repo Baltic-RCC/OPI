@@ -1,6 +1,6 @@
 from opi.integrations import send_excel_to_minio
 from opi.integrations import get_docs_by_query
-from opi.timeframes import get_opi_timestamps, get_opi_year, get_opi_period
+from opi.timeframes import get_opi_timestamps, get_opi_year, get_opi_period, get_run_time
 from opi.common import parse_app_properties
 from opi.integrations import set_task_version
 from opi.common import setup_logging
@@ -156,12 +156,13 @@ def main() -> None:
     parse_app_properties(caller_globals=globals(), path=config.paths.opi.report_generator)
 
     time_horizon = TIME_HORIZON
+    run_time = get_run_time(RUN_TIME, DATE_OFFSET)
     if SET_CRITICAL_TIMESTAMPS:
-        timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
+        timestamps = get_opi_timestamps(run_time=run_time, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
                                         time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
     else:
         # Timestamps with results in the assessed period, not recalculated (Y-1 ones depend on the UAP at run time)
-        period_start, period_end = get_opi_period(iso_offset=DATE_OFFSET, time_horizon=TIME_HORIZON)
+        period_start, period_end = get_opi_period(run_time=run_time, time_horizon=TIME_HORIZON)
         query = {"bool": {"filter": [
             {"match": {"@time_horizon": time_horizon}},
             {"range": {"@scenario_timestamp": {"gte": f"{period_start:%Y-%m-%d}T00:00:00",

@@ -4,6 +4,7 @@ import logging
 import contextvars
 import config
 from opi.timeframes import get_opi_timestamps, get_input_dir, get_uap_offset_time, get_opi_year
+from opi.timeframes import get_run_time, get_uap_time
 from opi.integrations import set_task_version
 from opi.outages import set_outage_corrections
 from opi.common import parse_app_properties
@@ -28,8 +29,11 @@ def main() -> None:
     # region.properties is parsed at import, before logging is set up
     logger.info(f"OPI region: {MERGE_TYPE} models, assessed areas {ASSESSED_AREAS}, external areas {EXTERNAL_AREAS}")
 
+    # One run time for the timestamps, the UAP query and the Y-1 year; RUN_TIME set for a rerun of old data
+    run_time = get_run_time(RUN_TIME, DATE_OFFSET)
+    logger.info(f"OPI run time: {run_time:%Y-%m-%d %H:%M}" + (f" (RUN_TIME {RUN_TIME})" if RUN_TIME.strip() else ""))
     uap_offset_time = get_uap_offset_time(time_offset=UAP_QUERY_OFFSET, time_horizon=TIME_HORIZON)
-    timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
+    timestamps = get_opi_timestamps(run_time=run_time, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
                                     time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS,
                                     uap_query_offset=uap_offset_time)
     if not timestamps:
@@ -57,13 +61,17 @@ def main() -> None:
 
     logger.info(f"OPI run: {TIME_HORIZON}, version {task_version}, {len(tasks)} timestamp(s): "
                 f"{[task.scenario_timestamp for task in tasks]}")
+    uap_time = get_uap_time(run_time, TIME_HORIZON, min(timestamps))
+    if uap_time < run_time:
+        logger.info(f"Assessed period started before the run time: UAP batch as of {uap_time:%Y-%m-%d %H:%M} "
+                    f"(rerun of old data)")
     # LF settings, input lists and the UAP batch are the same for every timestamp of the run
     lf_settings_keys = get_loadflow_settings_keys(SET_LF_PARAMETERS, LF_SETTINGS_PRIORITY,
                                                   dynamic=json.loads(ENABLE_DYNAMIC_LF_SETTINGS.lower()))
     inputs = RunInputs.load(time_horizon=TIME_HORIZON, lf_settings_keys=lf_settings_keys,
                             use_local_inputs=json.loads(USE_DEFAULT_INPUTS.lower()),
                             data_import_folder=get_input_dir(time_horizon=TIME_HORIZON),
-                            run_time_offset=DATE_OFFSET, uap_query_offset=uap_offset_time)
+                            uap_time=uap_time, uap_query_offset=uap_offset_time)
     failed = []
     for number, task in enumerate(tasks, start=1):
         logger.info(f"OPI task {number}/{len(tasks)} starting: {TIME_HORIZON} {task.scenario_timestamp} v{task_version}")

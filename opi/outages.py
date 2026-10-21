@@ -318,15 +318,14 @@ def outage_assessment(network: pp.network,
     return assessment_df
 
 
-def query_elk_uap(time_horizon: str, run_time_offset: str, uap_query_offset: str,
+def query_elk_uap(time_horizon: str, uap_time: datetime.datetime, uap_query_offset: str,
                   index: str = ELK_UAP_INDEX) -> pd.DataFrame | None:
-    """Latest UAP batch of the horizon in the query window, OUT and SSS rows; None when no batch is found."""
+    """Latest UAP batch of the horizon parsed by uap_time in the query window, OUT and SSS rows; None when no batch is found."""
     logger.info(f"Retrieving outages from ELK index: '{index}'")
 
-    # now represents the time of the run, in P0W case it should be current time
-    now = datetime.datetime.now() + isodate.parse_duration(run_time_offset)
-    filter_time = (now + isodate.parse_duration(uap_query_offset)).strftime("%Y-%m-%dT%H:%M") + "Z"
-    now = now.strftime("%Y-%m-%dT%H:%M") + "Z"
+    # uap_time is the run time, or the assessed period start for a rerun of old data
+    filter_time = (uap_time + isodate.parse_duration(uap_query_offset)).strftime("%Y-%m-%dT%H:%M") + "Z"
+    now = uap_time.strftime("%Y-%m-%dT%H:%M") + "Z"
 
     if time_horizon == 'WK':
         merge_type_list = ['week']
@@ -353,14 +352,15 @@ def query_elk_uap(time_horizon: str, run_time_offset: str, uap_query_offset: str
     # Get only latest report data
     response['reportParsedDate'] = pd.to_datetime(response['reportParsedDate'])
     response = response[response['reportParsedDate'] == response['reportParsedDate'].max()]
+    logger.info(f"UAP batch {merge_type_list} parsed {response['reportParsedDate'].max()}, latest by {now}")
 
     return response[response['outage_type'].isin(['OUT', 'SSS'])]
 
 
-def get_uap_outages(time_horizon: str, run_time_offset: str, uap_query_offset: str,
+def get_uap_outages(time_horizon: str, uap_time: datetime.datetime, uap_query_offset: str,
                     index: str = ELK_UAP_INDEX) -> pd.DataFrame:
     """Latest UAP batch without PROD rows; raises when no batch is found or a field the assessment reads is missing."""
-    response = query_elk_uap(time_horizon=time_horizon, run_time_offset=run_time_offset,
+    response = query_elk_uap(time_horizon=time_horizon, uap_time=uap_time,
                              uap_query_offset=uap_query_offset, index=index)
     if response is None:
         raise ValueError(f"No UAP batch found in '{index}'")
