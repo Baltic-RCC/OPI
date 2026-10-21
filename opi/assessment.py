@@ -1,5 +1,6 @@
 from datetime import datetime
 import uuid
+import re
 import pandas as pd
 from pathlib import Path
 import logging
@@ -637,9 +638,10 @@ class OutagePlanIncompatibilityAssessment:
                         profile_zip.writestr(new_name.replace(".zip", ".xml"), exported.read(name))
                     model_zip.writestr(new_name, profile_buffer.getvalue())
             model_buffer.seek(0)
-            model_buffer.name = (f"{folder}/{self.task.time_horizon}/"
-                                 f"{pd.Timestamp(self.task.scenario_timestamp):%Y%m%d}/"
-                                 f"{self.model_meta['name'].removesuffix('.zip')}_v{self.task.task_version}.zip")
+            # <folder>/<TH>/ as EMFOS models: OPI_ + source model name, its trailing uuid replaced by a new one
+            model_name = re.sub(r"_[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", "",
+                                self.model_meta['name'].removesuffix('.zip'))
+            model_buffer.name = f"{folder}/{self.task.time_horizon}/OPI_{model_name}_{uuid.uuid4()}.zip"
             minio_service.upload_object(file_path_or_file_object=model_buffer, bucket_name=bucket)
             logger.info(f"OPI model saved to MinIO: {bucket}/{model_buffer.name}")
         except Exception as error:
