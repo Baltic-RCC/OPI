@@ -9,6 +9,7 @@ from opi.outages import set_outage_corrections
 from opi.common import parse_app_properties
 from opi.assessment import OpiTask, RunInputs, OutagePlanIncompatibilityAssessment
 from opi.common import setup_logging, add_elk_handler
+from opi.region import MERGE_TYPE, ASSESSED_AREAS, EXTERNAL_AREAS
 import pypowsybl as pp
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ def main() -> None:
     # Uncaught errors, e.g. in the run preparation below, are logged (also to opi-logs); exit code stays 1
     sys.excepthook = lambda *exc_info: logger.critical("OPI run failed", exc_info=exc_info)
     logger.info(f"pypowsybl {pp.__version__}")
+    # region.properties is parsed at import, before logging is set up
+    logger.info(f"OPI region: {MERGE_TYPE} models, assessed areas {ASSESSED_AREAS}, external areas {EXTERNAL_AREAS}")
 
     uap_offset_time = get_uap_offset_time(time_offset=UAP_QUERY_OFFSET, time_horizon=TIME_HORIZON)
     timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),

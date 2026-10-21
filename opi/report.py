@@ -4,6 +4,7 @@ from opi.timeframes import get_opi_timestamps, get_opi_year, get_opi_period
 from opi.common import parse_app_properties
 from opi.integrations import set_task_version
 from opi.common import setup_logging
+from opi.region import EXTERNAL_AREAS, LINE_LOADING_LIMIT, TRANSFORMER_LOADING_LIMIT
 import config
 import pandas as pd
 import logging
@@ -232,19 +233,19 @@ def main() -> None:
                     elk_df = elk_df[
                         (
                                 (elk_df['subject_type'] == "LINE") &
-                                (elk_df['value_percent'] >= 105)
+                                (elk_df['value_percent'] >= LINE_LOADING_LIMIT)
                         ) |
                         (
                                 (
                                         (elk_df['subject_type'] == "TWO_WINDINGS_TRANSFORMER") |
                                         (elk_df['subject_type'] == "THREE_WINDINGS_TRANSFORMER")
                                 ) &
-                                (elk_df['value_percent'] >= 110)
+                                (elk_df['value_percent'] >= TRANSFORMER_LOADING_LIMIT)
                         )]
 
             if index == "branch-results":
                 if not elk_df.empty:
-                    elk_df = elk_df[elk_df['country1'] != 'PL']
+                    elk_df = elk_df[~elk_df['country1'].isin(EXTERNAL_AREAS)]
                     elk_df = elk_df[['subject_name'] + [c for c in elk_df.columns if c != 'subject_name']]
             if index == "bus-results":
                 if not elk_df.empty:

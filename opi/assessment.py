@@ -13,7 +13,7 @@ from config.opi import opi_lf_parameters
 from opi.timeframes import select_yr_models
 from opi.outages import run_outage_crosscheck
 from opi.outages import get_relevant_outages, get_uap_outages
-from opi.network import get_system_balance, get_ba_cross_border_flows
+from opi.network import get_system_balance, get_cross_border_flows
 import pypowsybl as pp
 import zipfile
 from opi.integrations import (get_all_minio_objects, query_data, download_models_from_minio,
@@ -22,12 +22,12 @@ from opi.integrations import (get_all_minio_objects, query_data, download_models
 from opi.timeframes import get_opi_week_number, get_result_opi_year
 from opi.integrations import send_opi_results_to_elk
 from opi.common import log_context
+from opi.region import (MERGE_TYPE, ASSESSED_AREAS, EXTERNAL_AREAS, AREA_TSO_NAMES, EXPORT_NAME_REPLACE,
+                        normalize_area)
 from pydantic import BaseModel, Field, AliasChoices
 from typing import Optional, List, Any
 
 logger = logging.getLogger(__name__)
-
-EXPECTED_AREAS = ['LV', 'LT', 'EE']
 
 
 class AssessedElement(BaseModel):
@@ -377,7 +377,7 @@ class OutagePlanIncompatibilityAssessment:
 
         else:
             query = {
-                "merge_type": "BA",
+                "merge_type": MERGE_TYPE,
                 "@time_horizon": self.task.time_horizon,
                 "@scenario_timestamp": self.task.scenario_timestamp,
             }
@@ -430,8 +430,7 @@ class OutagePlanIncompatibilityAssessment:
                                                  assessed_elements=self.assessed_elements,
                                                  lf_parameters=self.inputs.lf_parameters, sa_parameters=self.inputs.sa_parameters,
                                                  debug=False)
-        self.areas = [x.replace('Estonia', 'EE').replace("10YLV", "LV")
-                      for x in self.security_service.network.get_areas()['name'].to_list()]
+        self.areas = [normalize_area(x) for x in self.security_service.network.get_areas()['name'].to_list()]
         # Kept on the service as before, loadflow_engine may read it
         self.security_service.present_igms = self.areas
 
@@ -455,10 +454,11 @@ class OutagePlanIncompatibilityAssessment:
             logger.info(f"Model {str(self.model_meta['name'])} has separated islands")
             return
 
-        if 'PL' not in self.areas:
-            logger.warning(f"Missing PSE model in {self.model_meta['name']}")
+        missing_external = [area for area in EXTERNAL_AREAS if area not in self.areas]
+        if missing_external:
+            logger.warning(f"Missing {missing_external} model in {self.model_meta['name']}")
 
-        if not set(EXPECTED_AREAS).issubset(self.areas):
+        if not set(ASSESSED_AREAS).issubset(self.areas):
             self.model_is_valid = False
             logger.info(f"Validation failed, IGMs -> {self.areas} for {str(self.model_meta['name'])} ")
             return
@@ -521,7 +521,7 @@ class OutagePlanIncompatibilityAssessment:
         if not self.outages_to_reconnect.empty:
             logger.info(f"Reconnecting outages to network instance: '{outage_configuration_id}'")
             for index, outage in self.outages_to_reconnect.drop_duplicates('equipment').iterrows():
-                if outage.type != 'transformer' and outage.area != 'PL' and pd.notna(outage.equipment):
+                if outage.type != 'transformer' and outage.area not in EXTERNAL_AREAS and pd.notna(outage.equipment):
                     try:
                         # Closes the open switches on the shortest path to a busbar section (needs node-breaker import)
                         if self.security_service.network.connect(outage.equipment, operate_disconnectors=True,
@@ -592,9 +592,9 @@ class OutagePlanIncompatibilityAssessment:
 
             # Security analysis does not update the network state: read from the solved outage-applied model
             self.security_service.network.set_working_variant(outage_configuration_id)
-            border_flows = get_ba_cross_border_flows(self.security_service.network, self.model_data).sort_values('Cross_border')
+            border_flows = get_cross_border_flows(self.security_service.network, self.model_data).sort_values('Cross_border')
             system_balance = get_system_balance(self.security_service.network, self.areas, border_flows)
-            system_balance = system_balance[~system_balance['area'].str.contains('PL')]
+            system_balance = system_balance[~system_balance['area'].isin(EXTERNAL_AREAS)]
 
             self.opi_results = {"confirmed-outages" : self.confirmed_outages[['area', 'name', 'description']].copy(),
                                 "border-flows": border_flows[['Cross_border', 'name', 'P_MW']].copy(),
@@ -620,7 +620,6 @@ class OutagePlanIncompatibilityAssessment:
                 "iidm.export.cgmes.export-sv-injections-for-slacks": "False",
             }))
             original = zipfile.ZipFile(BytesIO(self.model_data))
-            tso_names = {"LT": "LITGRID", "LV": "AST", "EE": "ELERING", "PL": "PSE"}
             model_buffer = BytesIO()
             with zipfile.ZipFile(model_buffer, "w", zipfile.ZIP_DEFLATED) as model_zip:
                 for name in original.namelist():
@@ -628,11 +627,12 @@ class OutagePlanIncompatibilityAssessment:
                         model_zip.writestr(name, original.read(name))
                 for name in exported.namelist():
                     if "_SSH" in name:
-                        original_part = f"-{tso_names[name.split('_')[-2]]}_SSH_"
+                        original_part = f"-{AREA_TSO_NAMES[name.split('_')[-2]]}_SSH_"
                     else:
                         original_part = "_SV_"
                     new_name = next(n for n in original.namelist() if original_part in n)
-                    new_name = new_name.replace("BALTICRCC-BA", "BRCC-OPI")
+                    for old, new in EXPORT_NAME_REPLACE.items():
+                        new_name = new_name.replace(old, new)
                     profile_buffer = BytesIO()
                     with zipfile.ZipFile(profile_buffer, "w", zipfile.ZIP_DEFLATED) as profile_zip:
                         profile_zip.writestr(new_name.replace(".zip", ".xml"), exported.read(name))

@@ -8,12 +8,10 @@ from xml.etree import ElementTree
 from pypowsybl.network import ElementType
 from loadflow_engine.helper import get_network_elements
 from numpy import sign, isnan
+from opi.region import ASSESSED_AREAS, AREA_ALIASES
 
 
 logger = logging.getLogger(__name__)
-
-# Border label order: LT-LV, LV-EE, LT-PL, ... Lines without one of these areas are not reported
-BA_BORDER_ORDER = ['LT', 'LV', 'EE']
 
 
 def unzip_zipped_profiles(path_or_buffer: str):
@@ -180,9 +178,9 @@ def get_system_balance(network: pp.network.Network, areas: list, border_flows: p
     return round(result_df, 2).reset_index(names=['area'])
 
 
-def get_ba_cross_border_flows(network: pp.network.Network, model_data: bytes) -> pd.DataFrame:
+def get_cross_border_flows(network: pp.network.Network, model_data: bytes) -> pd.DataFrame:
     """
-    Flows on tie lines and HVDC links of the Baltic areas, one row per X-node.
+    Flows on tie lines and HVDC links of the assessed areas, one row per X-node.
     P_MW is positive from the first area of Cross_border to the second.
     HVDC links are boundary lines with the CGMES import property isHvdc, their far side comes from the boundary set.
     """
@@ -196,11 +194,12 @@ def get_ba_cross_border_flows(network: pp.network.Network, model_data: bytes) ->
     if 'isHvdc' not in lines.columns:
         lines['isHvdc'] = ''
     substations = network.get_voltage_levels()['substation_id']
-    regions = network.get_substations(all_attributes=True)['CGMES.regionName'].replace({'Estonia': 'EE', 'EESTI': 'EE'})
+    regions = network.get_substations(all_attributes=True)['CGMES.regionName'].replace(AREA_ALIASES)
     lines['area'] = lines['voltage_level_id'].map(substations).map(regions)
     lines = lines.drop_duplicates(subset=['pairing_key', 'area'])
 
-    order = {area: i for i, area in enumerate(BA_BORDER_ORDER)}
+    # Border labels in ASSESSED_AREAS order: LT-LV, LV-EE, LT-PL, ... Lines without an assessed area are not reported
+    order = {area: i for i, area in enumerate(ASSESSED_AREAS)}
     rows = []
     for xnode, halves in lines.groupby('pairing_key'):
         halves = halves.sort_values('area', key=lambda area: area.map(order).fillna(len(order)))

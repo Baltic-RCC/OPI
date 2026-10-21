@@ -7,13 +7,10 @@ from pathlib import Path
 from typing import Optional, List
 from loadflow_engine.helper import get_network_elements_by_ids
 from opi.integrations import get_docs_by_query, ELK_UAP_INDEX
+from opi.region import EXTERNAL_AREAS, UAP_EXCLUDED_EICS, UAP_EXCLUDED_NAMES
 
 logger = logging.getLogger(__name__)
 
-# Remove BRELL lines from UAP
-BRELL_LINES = ['10T-LT-RU-00001W', '10T-LT-RU-00002U', '10T-LT-RU-00003S', '10T-LV-RU-00001A',
-               '10T-BY-LT-000053', '10T-BY-LT-00001B', '10T-BY-LT-000029',
-               '10T-EE-RU-00001M', '10T-EE-RU-00002K', '10T-EE-RU-00003I', '10T-BY-LT-000045']
 # Mapped UAP outages: grid element ID with the UAP Area and outage name
 UAP_ID_COLUMNS = ['grid_element_id', 'Area', 'name']
 # UAP fields the assessment reads
@@ -51,7 +48,7 @@ def run_outage_crosscheck(network: pp.network,
          raise ValueError(f"Element DF missing required columns: {missing}")
 
     # Filter elements
-    element_df_filtered = element_df[element_df['secured_for_region'] != 'PL'].copy()
+    element_df_filtered = element_df[~element_df['secured_for_region'].isin(EXTERNAL_AREAS)].copy()
 
     # Determine Scenario Time
     if set_timestamp:
@@ -77,9 +74,9 @@ def run_outage_crosscheck(network: pp.network,
 
     # Map relevant outages to grid IDs using the filtered element list
     mapped_uap_outages = get_outage_grid_id(relevant_outages_df, element_df_filtered, contingency_list)
-    # PL elements stay as modelled by design
-    pl_ids = element_df.loc[element_df['secured_for_region'] == 'PL', 'grid_element_id'].astype(str)
-    mapped_uap_outages = mapped_uap_outages[~mapped_uap_outages['grid_element_id'].isin(pl_ids)]
+    # Elements of external areas stay as modelled by design
+    external_ids = element_df.loc[element_df['secured_for_region'].isin(EXTERNAL_AREAS), 'grid_element_id'].astype(str)
+    mapped_uap_outages = mapped_uap_outages[~mapped_uap_outages['grid_element_id'].isin(external_ids)]
 
     # Pass the filtered element list and mapped IDs to the assessment function
     result_assessment_df = outage_assessment(network, element_df_filtered, mapped_uap_outages['grid_element_id'],
@@ -135,10 +132,9 @@ def get_outage_grid_id(relevant_outages_df: pd.DataFrame, element_df: pd.DataFra
         logger.info("No relevant outages to map.")
         return pd.DataFrame(columns=UAP_ID_COLUMNS)
 
-    # TODO hack solution until Litgrid fixes eic in OPC tool
-    #  this should not cause issues even after eic change
-    relevant_outages_df['eic'] = relevant_outages_df['eic'].replace('41TKRUONIOHAE32Q', '41T9472798283LN-')
-    relevant_outages_df = relevant_outages_df[~relevant_outages_df['name'].str.contains("LitPol Link BTB", na=False)]
+    # UAP outages ignored by name (region.properties)
+    for name in UAP_EXCLUDED_NAMES:
+        relevant_outages_df = relevant_outages_df[~relevant_outages_df['name'].str.contains(name, na=False, regex=False)]
 
     # Input Validation
     if not isinstance(relevant_outages_df, pd.DataFrame):
@@ -163,9 +159,9 @@ def get_outage_grid_id(relevant_outages_df: pd.DataFrame, element_df: pd.DataFra
          raise ValueError("Required 'grid_element_id' column missing in element_df.")
 
     try:
-        # Filter BRELL
-        outage_df_filtered = relevant_outages_df[~relevant_outages_df['eic'].isin(BRELL_LINES)].copy()
-        logger.debug(f"Filtered out {len(relevant_outages_df) - len(outage_df_filtered)} BRELL lines.")
+        # Filter ignored EICs (BRELL lines)
+        outage_df_filtered = relevant_outages_df[~relevant_outages_df['eic'].isin(UAP_EXCLUDED_EICS)].copy()
+        logger.debug(f"Filtered out {len(relevant_outages_df) - len(outage_df_filtered)} ignored EIC outages.")
 
         # --- Merge ---
         # Select only necessary columns from element_df for the merge
