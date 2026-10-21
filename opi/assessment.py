@@ -13,7 +13,7 @@ from config.opi import opi_lf_parameters
 from opi.timeframes import select_yr_models
 from opi.outages import run_outage_crosscheck
 from opi.outages import get_relevant_outages, get_uap_outages
-from opi.network import get_system_balance, get_cross_border_flows
+from opi.network import get_system_balance, get_cross_border_flows, get_tie_line_halves
 import pypowsybl as pp
 import zipfile
 from opi.integrations import (get_all_minio_objects, query_data, download_models_from_minio,
@@ -517,40 +517,65 @@ class OutagePlanIncompatibilityAssessment:
         logger.info(f"Network model working variant initialized and activated: {outage_configuration_id}")
 
         changed_outage_list = []
+        # Tie lines are switched on both sides when paired in the model
+        tie_line_halves = get_tie_line_halves(self.security_service.network)
+        outage_ids = {element_id for equipment in self.confirmed_outages['equipment']
+                      for element_id in tie_line_halves.get(equipment, [equipment])} - set(enabled)
         # Reconnecting relevant outages
         if not self.outages_to_reconnect.empty:
             logger.info(f"Reconnecting outages to network instance: '{outage_configuration_id}'")
+            unchanged = []
             for index, outage in self.outages_to_reconnect.drop_duplicates('equipment').iterrows():
                 if outage.type != 'transformer' and outage.area not in EXTERNAL_AREAS and pd.notna(outage.equipment):
                     try:
                         # Closes the open switches on the shortest path to a busbar section (needs node-breaker import)
-                        if self.security_service.network.connect(outage.equipment, operate_disconnectors=True,
-                                                                 operate_fictitious=True):
-                            logger.info(f" {outage['name']} {outage.equipment} reconnected")
-                            changed_outage_list.append(outage)
-                        elif outage.outage_in_cgm:
-                            logger.warning(f"Failed to reconnect {outage['name']} {outage.equipment}: no switch path to a busbar section")
+                        for element_id in tie_line_halves.get(outage.equipment, [outage.equipment]):
+                            # Other half of a tie line in outage: the tie line goes out on both sides below
+                            if element_id in outage_ids:
+                                continue
+                            if self.security_service.network.connect(element_id, operate_disconnectors=True,
+                                                                     operate_fictitious=True):
+                                logger.info(f" {outage['name']} {element_id} reconnected")
+                                changed_outage_list.append(outage)
+                            else:
+                                unchanged.append((outage['name'], element_id))
 
                     except Exception as e:
                         logger.error(f"Failed to reconnect {outage['name']} {outage.equipment}: {e}")
                         continue
 
-        # Disconnect confirmed outages
-        logger.info(f"Applying outages to network instance: {outage_configuration_id}")
-        for index, outage in self.confirmed_outages.iterrows():
-            try:
-                if self.security_service.network.disconnect(outage.equipment):
-                    logger.info(f"{outage['name']} {outage.equipment} disconnected")
-                    changed_outage_list.append(outage)
+            # Unchanged but not fully connected: no switch path to a busbar section
+            if unchanged:
+                fully_connected = self.security_service.network.get_terminals()['connected'].groupby(level=0).all()
+                for name, element_id in unchanged:
+                    if not fully_connected.get(element_id, False):
+                        logger.warning(f"Failed to reconnect {name} {element_id}: no switch path to a busbar section")
 
-                else:
-                    if self.model_outages.equipment.str.contains(outage.equipment).any():
-                        logger.debug(f"{outage['name']} {outage.equipment} is already in outage")
+        # Disconnect confirmed outages, a paired tie line on both sides
+        logger.info(f"Applying outages to network instance: {outage_configuration_id}")
+        unchanged = []
+        for index, outage in self.confirmed_outages.iterrows():
+            for element_id in tie_line_halves.get(outage.equipment, [outage.equipment]):
+                if element_id not in outage_ids:
+                    continue
+                try:
+                    if self.security_service.network.disconnect(element_id, operate_disconnectors=True,
+                                                                operate_fictitious=True):
+                        logger.info(f"{outage['name']} {element_id} disconnected")
+                        changed_outage_list.append(outage)
                     else:
-                        logger.error(f"Failed to disconnect: {outage['name']} {outage.equipment}")
-            except Exception as e:
-                logger.error(f"Failed to disconnect {outage['name']} {outage.equipment}: {e}")
-                continue
+                        unchanged.append((outage['name'], element_id))
+                except Exception as e:
+                    logger.error(f"Failed to disconnect {outage['name']} {element_id}: {e}")
+                    continue
+        # Unchanged: already in outage, or no switch could be opened when still fully connected
+        if unchanged:
+            fully_connected = self.security_service.network.get_terminals()['connected'].groupby(level=0).all()
+            for name, element_id in unchanged:
+                if fully_connected.get(element_id, False):
+                    logger.error(f"Failed to disconnect: {name} {element_id}")
+                else:
+                    logger.debug(f"{name} {element_id} is already in outage")
 
         # Model with outages applied must solve; border flows, system balance and the export use this solved state
         try:
@@ -638,7 +663,7 @@ class OutagePlanIncompatibilityAssessment:
                         profile_zip.writestr(new_name.replace(".zip", ".xml"), exported.read(name))
                     model_zip.writestr(new_name, profile_buffer.getvalue())
             model_buffer.seek(0)
-            # <folder>/<TH>/ as EMFOS models: OPI_ + source model name, its trailing uuid replaced by a new one
+            # OPI_<model_name>_<uuid>.zip
             model_name = re.sub(r"_[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", "",
                                 self.model_meta['name'].removesuffix('.zip'))
             model_buffer.name = f"{folder}/{self.task.time_horizon}/OPI_{model_name}_{uuid.uuid4()}.zip"

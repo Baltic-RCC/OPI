@@ -222,3 +222,13 @@ def get_cross_border_flows(network: pp.network.Network, model_data: bytes) -> pd
                      'P_MW': 0 if isnan(p) else p, 'hvdc': hvdc})
 
     return pd.DataFrame(rows, columns=['Cross_border', 'name', 'P_MW', 'hvdc'])
+
+
+def get_tie_line_halves(network: pp.network.Network) -> dict[str, list[str]]:
+    """Boundary line or tie line id -> both boundary lines of the tie line, for boundary lines paired in the model."""
+    lines = network.get_boundary_lines(attributes=['tie_line_id'])
+    # Paired as in EMFOS: tie_line_id set; an unpaired boundary line is switched on its own side only
+    paired = lines[lines['tie_line_id'].fillna('') != '']
+    halves = {tie_line_id: group.index.tolist() for tie_line_id, group in paired.groupby('tie_line_id')}
+
+    return {**halves, **{line_id: halves[tie_line_id] for line_id, tie_line_id in paired['tie_line_id'].items()}}
