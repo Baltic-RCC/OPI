@@ -24,5 +24,5 @@ python -m opi.worker   # OPI run, settings in config/task_generator/task.propert
 python -m opi.report   # Excel report, settings in config/opi/report_generator.properties
 ```
 
-The assessed region (EMFOS merge type, assessed and external areas, UAP fixes) is set in `config/opi/region.properties`,
+The assessed region (merge type, assessed and external areas, UAP fixes) is set in `config/opi/region.properties`,
 Baltic RCC by default. Every `.properties` key can be overridden by an environment variable of the same name.

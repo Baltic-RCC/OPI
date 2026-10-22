@@ -154,6 +154,18 @@ def get_loadflow_settings(lf_parameters_key: str, elk_server: str) -> tuple[pp.l
     return lf_parameters, sa_parameters
 
 
+def get_loadflow_settings_keys(lf_parameters_key: str, priority: str, dynamic: bool) -> list[str]:
+    """LF settings tried in order while a load flow does not converge: lf_parameters_key, then the ones after it in
+    the priority list. A key missing from the list is tried before the whole list."""
+    if not dynamic:
+        return [lf_parameters_key]
+    keys = [key.strip() for key in priority.split(",") if key.strip()]
+    if lf_parameters_key not in keys:
+        return [lf_parameters_key, *keys]
+
+    return keys[keys.index(lf_parameters_key):]
+
+
 def get_input_data(time_horizon: str, minio_bucket: str, data_import_folder: str,
                    use_local_inputs: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Assessed element and contingency lists of the horizon, from the repository inputs or MinIO."""
@@ -197,21 +209,21 @@ class OpiTask:
 @dataclass(frozen=True)
 class RunInputs:
     """Inputs shared by all timestamps of a run, loaded once."""
-    lf_parameters: pp.loadflow.Parameters
-    sa_parameters: pp.security.Parameters
+    # LF settings key -> LF and SA parameters, in the order they are tried
+    lf_settings: dict[str, tuple[pp.loadflow.Parameters, pp.security.Parameters]]
     assessed_elements_df: pd.DataFrame
     contingencies_df: pd.DataFrame
     uap_outages: pd.DataFrame
 
     @classmethod
-    def load(cls, time_horizon: str, lf_parameters_key: str, use_local_inputs: bool, data_import_folder: str,
+    def load(cls, time_horizon: str, lf_settings_keys: list[str], use_local_inputs: bool, data_import_folder: str,
              run_time_offset: str, uap_query_offset: str) -> "RunInputs":
-        lf_parameters, sa_parameters = get_loadflow_settings(lf_parameters_key, elk_server=ELK_SERVER)
+        lf_settings = {key: get_loadflow_settings(key, elk_server=ELK_SERVER) for key in lf_settings_keys}
         assessed_elements_df, contingencies_df = get_input_data(time_horizon, DATA_IMPORT_BUCKET, data_import_folder,
                                                                 use_local_inputs=use_local_inputs)
         uap_outages = get_uap_outages(time_horizon=time_horizon, run_time_offset=run_time_offset,
                                       uap_query_offset=uap_query_offset, index=ELK_UAP_INDEX)
-        return cls(lf_parameters, sa_parameters, assessed_elements_df, contingencies_df, uap_outages)
+        return cls(lf_settings, assessed_elements_df, contingencies_df, uap_outages)
 
 
 class OutagePlanIncompatibilityAssessment:
@@ -227,6 +239,7 @@ class OutagePlanIncompatibilityAssessment:
         self.model_data = None
         self.pp_network = None
         self.security_service = None
+        self.lf_settings_key = None
         self.areas: List[str] = []
         self.model_is_valid = None
         self.base_case_violations = None
@@ -426,13 +439,19 @@ class OutagePlanIncompatibilityAssessment:
     def load_model_data(self):
 
         self.pp_network = load_network(self.model_data, parameters=opi_lf_parameters.CGMES_IMPORT_PARAMETERS)
+        self.set_security_service(next(iter(self.inputs.lf_settings)))
+
+    def set_security_service(self, lf_settings_key: str) -> None:
+        """Security analysis of the model with the given LF settings."""
+        lf_parameters, sa_parameters = self.inputs.lf_settings[lf_settings_key]
         self.security_service = SecurityAnalysis(network=self.pp_network, contingencies=self.contingencies,
                                                  assessed_elements=self.assessed_elements,
-                                                 lf_parameters=self.inputs.lf_parameters, sa_parameters=self.inputs.sa_parameters,
+                                                 lf_parameters=lf_parameters, sa_parameters=sa_parameters,
                                                  debug=False)
         self.areas = [normalize_area(x) for x in self.security_service.network.get_areas()['name'].to_list()]
         # Kept on the service as before, loadflow_engine may read it
         self.security_service.present_igms = self.areas
+        self.lf_settings_key = lf_settings_key
 
 
     def validate_base_case(self):
@@ -463,13 +482,18 @@ class OutagePlanIncompatibilityAssessment:
             logger.info(f"Validation failed, IGMs -> {self.areas} for {str(self.model_meta['name'])} ")
             return
 
-        # Model as is must solve: base case without contingencies, one load flow with the N-1 settings
-        base_case = pp.security.create_analysis().run_ac(self.security_service.network, parameters=self.inputs.sa_parameters)
-        base_case_status = base_case.pre_contingency_result.status.name
+        # Model as is must solve: base case without contingencies, LF settings relaxed until it converges
+        for lf_settings_key, (_, sa_parameters) in self.inputs.lf_settings.items():
+            base_case = pp.security.create_analysis().run_ac(self.security_service.network, parameters=sa_parameters)
+            base_case_status = base_case.pre_contingency_result.status.name
+            if base_case_status == 'CONVERGED':
+                break
+            logger.warning(f"Base case load flow {base_case_status} with LF settings: {lf_settings_key}")
         if base_case_status != 'CONVERGED':
             self.model_is_valid = False
             logger.info(f"Base case load flow {base_case_status} in {self.model_meta['name']}")
             return
+        logger.info(f"Base case solved with LF settings: {lf_settings_key}")
 
         # Base case violations do not invalidate the model; they are flagged in the OPI violations
         violations = base_case.limit_violations.reset_index()
@@ -577,13 +601,18 @@ class OutagePlanIncompatibilityAssessment:
                 else:
                     logger.debug(f"{name} {element_id} is already in outage")
 
-        # Model with outages applied must solve; border flows, system balance and the export use this solved state
-        try:
-            lf_result = pp.loadflow.run_ac(self.security_service.network, parameters=self.inputs.lf_parameters)
-            self.outage_lf_status = lf_result[0].status.name
-        except Exception as error:
-            logger.error(f"Load flow with outages applied failed: {error}")
-            self.outage_lf_status = 'FAILED'
+        # Model with outages applied must solve, LF settings relaxed until it converges;
+        # border flows, system balance, the export and the N-1 use this solved state and its LF settings
+        for lf_settings_key, (lf_parameters, _) in self.inputs.lf_settings.items():
+            try:
+                lf_result = pp.loadflow.run_ac(self.security_service.network, parameters=lf_parameters)
+                self.outage_lf_status = lf_result[0].status.name
+            except Exception as error:
+                logger.error(f"Load flow with outages applied failed with LF settings {lf_settings_key}: {error}")
+                self.outage_lf_status = 'FAILED'
+            if self.outage_lf_status == 'CONVERGED':
+                break
+            logger.warning(f"Load flow with outages applied {self.outage_lf_status} with LF settings: {lf_settings_key}")
         if self.outage_lf_status != 'CONVERGED':
             if self.task.validate_models:
                 self.model_is_valid = False
@@ -593,8 +622,14 @@ class OutagePlanIncompatibilityAssessment:
                 return
             logger.warning(f"Model with outages applied does not solve ({self.outage_lf_status}), "
                            f"border flows and system balance may show pre-outage values")
+        elif lf_settings_key != self.lf_settings_key:
+            # New security analysis with the settings that solved the model, loadflow_engine gets its own objects
+            self.assessed_elements = assessed_elements_from_dataframe(data=self.inputs.assessed_elements_df)
+            self.contingencies = contingencies_from_dataframe(data=self.inputs.contingencies_df)
+            self.set_security_service(lf_settings_key)
 
         # Run security assessment scenario
+        logger.info(f"N-1 with LF settings: {self.lf_settings_key}")
         sa_status = self.security_service.run_security_analysis()
 
         # Process OPI results
@@ -688,6 +723,7 @@ class OutagePlanIncompatibilityAssessment:
                 result_df['@time_horizon'] = self.task.time_horizon
                 result_df['@run_id'] = run_id
                 result_df['@version'] = self.task.task_version
+                result_df['loadflow_settings'] = self.lf_settings_key
                 result_df['week_day'] = timestamp.weekday()
                 opi_week = get_opi_week_number(timestamp)
                 result_df['opi_week'] = opi_week

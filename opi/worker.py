@@ -7,7 +7,7 @@ from opi.timeframes import get_opi_timestamps, get_input_dir, get_uap_offset_tim
 from opi.integrations import set_task_version
 from opi.outages import set_outage_corrections
 from opi.common import parse_app_properties
-from opi.assessment import OpiTask, RunInputs, OutagePlanIncompatibilityAssessment
+from opi.assessment import OpiTask, RunInputs, OutagePlanIncompatibilityAssessment, get_loadflow_settings_keys
 from opi.common import setup_logging, add_elk_handler
 from opi.region import MERGE_TYPE, ASSESSED_AREAS, EXTERNAL_AREAS
 import pypowsybl as pp
@@ -58,7 +58,9 @@ def main() -> None:
     logger.info(f"OPI run: {TIME_HORIZON}, version {task_version}, {len(tasks)} timestamp(s): "
                 f"{[task.scenario_timestamp for task in tasks]}")
     # LF settings, input lists and the UAP batch are the same for every timestamp of the run
-    inputs = RunInputs.load(time_horizon=TIME_HORIZON, lf_parameters_key=SET_LF_PARAMETERS,
+    lf_settings_keys = get_loadflow_settings_keys(SET_LF_PARAMETERS, LF_SETTINGS_PRIORITY,
+                                                  dynamic=json.loads(ENABLE_DYNAMIC_LF_SETTINGS.lower()))
+    inputs = RunInputs.load(time_horizon=TIME_HORIZON, lf_settings_keys=lf_settings_keys,
                             use_local_inputs=json.loads(USE_DEFAULT_INPUTS.lower()),
                             data_import_folder=get_input_dir(time_horizon=TIME_HORIZON),
                             run_time_offset=DATE_OFFSET, uap_query_offset=uap_offset_time)
