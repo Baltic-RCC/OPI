@@ -49,7 +49,7 @@ def calculate_critical_timestamps(uap_df: pd.DataFrame, candidates: List[pd.Time
 
         # Same elements out in the same season (same model) give the same result
         season_sets = checked_sets.setdefault(get_yr_season(timestamp), set())
-        outage_set = frozenset(date_outages['eic'].dropna())
+        outage_set = frozenset(date_outages['mrid'].dropna())
         if not outage_set or outage_set in season_sets:
             continue
         season_sets.add(outage_set)
