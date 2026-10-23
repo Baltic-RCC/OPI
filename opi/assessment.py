@@ -18,7 +18,7 @@ import pypowsybl as pp
 import zipfile
 from opi.integrations import (get_all_minio_objects, query_data, download_models_from_minio,
                               get_lf_settings_manager, minio_service, OPI_MODEL_BUCKET, OPI_MODEL_FOLDER,
-                              ELK_SERVER, ELK_UAP_INDEX, DATA_IMPORT_BUCKET, DATA_EXPORT_BUCKET, OPI_MODEL_EXPORT_FOLDER)
+                              ELK_SERVER, ELK_UAP_INDEX, DATA_IMPORT_BUCKET, OPI_MODEL_EXPORT_BUCKET, OPI_MODEL_EXPORT_FOLDER)
 from opi.timeframes import get_opi_week_number, get_result_opi_year
 from opi.integrations import send_opi_results_to_elk
 from opi.common import log_context
@@ -279,7 +279,7 @@ class OutagePlanIncompatibilityAssessment:
         self.calculate_opi()
         sa_diverged = self.opi_results is None
         if task.export_models:
-            self.export_model_to_minio(bucket=DATA_EXPORT_BUCKET, folder=OPI_MODEL_EXPORT_FOLDER)
+            self.export_model_to_minio(bucket=OPI_MODEL_EXPORT_BUCKET, folder=OPI_MODEL_EXPORT_FOLDER)
         # After calculate_opi: adds to opi_results, also when security analysis diverged
         if task.inertia_enabled:
             try:
