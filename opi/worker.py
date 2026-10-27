@@ -63,7 +63,8 @@ def main() -> None:
     inputs = RunInputs.load(time_horizon=TIME_HORIZON, lf_settings_keys=lf_settings_keys,
                             use_local_inputs=json.loads(USE_DEFAULT_INPUTS.lower()),
                             data_import_folder=get_input_dir(time_horizon=TIME_HORIZON),
-                            run_time_offset=DATE_OFFSET, uap_query_offset=uap_offset_time)
+                            run_time_offset=DATE_OFFSET, uap_query_offset=uap_offset_time,
+                            inertia_enabled=json.loads(CALCULATE_INERTIA.lower()))
     failed = []
     for number, task in enumerate(tasks, start=1):
         logger.info(f"OPI task {number}/{len(tasks)} starting: {TIME_HORIZON} {task.scenario_timestamp} v{task_version}")

@@ -185,6 +185,16 @@ def get_input_data(time_horizon: str, minio_bucket: str, data_import_folder: str
     return assessed_element_df, contingency_df
 
 
+def get_inertia_ratings(minio_bucket: str, use_local_inputs: bool = True) -> pd.DataFrame:
+    """Unit Ek ratings for the inertia calculation (all sheets), from the repository inputs or MinIO."""
+    if use_local_inputs:
+        source = Path(__file__).resolve().parent.parent / "inputs" / "general" / "inertia_ratings.xlsx"
+    else:
+        source = BytesIO(minio_service.download_object(minio_bucket, "OPI/inputs/general/inertia_ratings.xlsx"))
+
+    return pd.concat(pd.read_excel(source, sheet_name=None).values(), ignore_index=True)
+
+
 @dataclass(frozen=True)
 class OpiTask:
     """One timestamp of an OPI run."""
@@ -214,16 +224,24 @@ class RunInputs:
     assessed_elements_df: pd.DataFrame
     contingencies_df: pd.DataFrame
     uap_outages: pd.DataFrame
+    # None when inertia is off or the ratings could not be loaded
+    inertia_ratings: pd.DataFrame | None
 
     @classmethod
     def load(cls, time_horizon: str, lf_settings_keys: list[str], use_local_inputs: bool, data_import_folder: str,
-             run_time_offset: str, uap_query_offset: str) -> "RunInputs":
+             run_time_offset: str, uap_query_offset: str, inertia_enabled: bool) -> "RunInputs":
         lf_settings = {key: get_loadflow_settings(key, elk_server=ELK_SERVER) for key in lf_settings_keys}
         assessed_elements_df, contingencies_df = get_input_data(time_horizon, DATA_IMPORT_BUCKET, data_import_folder,
                                                                 use_local_inputs=use_local_inputs)
         uap_outages = get_uap_outages(time_horizon=time_horizon, run_time_offset=run_time_offset,
                                       uap_query_offset=uap_query_offset, index=ELK_UAP_INDEX)
-        return cls(lf_settings, assessed_elements_df, contingencies_df, uap_outages)
+        inertia_ratings = None
+        if inertia_enabled:
+            try:
+                inertia_ratings = get_inertia_ratings(DATA_IMPORT_BUCKET, use_local_inputs=use_local_inputs)
+            except Exception as error:
+                logger.error(f"Inertia ratings loading failed, inertia not calculated: {error}")
+        return cls(lf_settings, assessed_elements_df, contingencies_df, uap_outages, inertia_ratings)
 
 
 class OutagePlanIncompatibilityAssessment:
@@ -281,7 +299,7 @@ class OutagePlanIncompatibilityAssessment:
         if task.export_models:
             self.export_model_to_minio(bucket=OPI_MODEL_EXPORT_BUCKET, folder=OPI_MODEL_EXPORT_FOLDER)
         # After calculate_opi: adds to opi_results, also when security analysis diverged
-        if task.inertia_enabled:
+        if task.inertia_enabled and self.inputs.inertia_ratings is not None:
             try:
                 self.calculate_inertia()
             except Exception as error:
@@ -303,8 +321,7 @@ class OutagePlanIncompatibilityAssessment:
 
     def calculate_inertia(self) -> None:
         """Kinetic energy (Ek, MWs) of rated units per area: total fleet, scheduled in model, missing due to UAP outages."""
-        ratings_path = Path(__file__).resolve().parent.parent / "inputs" / "general" / "inertia_ratings.xlsx"
-        ratings = pd.concat(pd.read_excel(ratings_path, sheet_name=None).values(), ignore_index=True)
+        ratings = self.inputs.inertia_ratings
 
         units = pd.DataFrame({
             "area": ratings["Area"].fillna("").astype(str).str.strip(),
