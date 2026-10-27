@@ -20,8 +20,8 @@ In the European electricity grid, Transmission System Operators (TSOs) and Regio
 Run from the repository root:
 
 ```
-python -m opi.worker   # OPI run, settings in config/task_generator/task.properties
-python -m opi.report   # Excel report, settings in config/opi/report_generator.properties
+python -m opi.worker   # OPI run, settings in config/opi/worker.properties
+python -m opi.report   # Excel report, settings in config/opi/report.properties
 ```
 
 The assessed region (merge type, assessed and external areas, UAP fixes) is set in `config/opi/region.properties`,

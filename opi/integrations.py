@@ -15,14 +15,14 @@ minio_service = ObjectStorage(server=OBJECTSTORAGE_URL, username=OBJECTSTORAGE_U
 elastic_service = Elastic(server=ELK_SERVER, api_key=ELK_API_KEY)
 
 
-def query_data(metadata_query: dict, query_filter: str = None, index: str = ELASTIC_QUERY_INDEX, size: str = '10000', sort: dict=None, scroll='1m'):
+def query_data(metadata_query: dict, query_filter: str = None, index: str = ELK_MERGE_REPORT_INDEX, size: str = '10000', sort: dict=None, scroll='1m'):
     """
     Queries Elasticsearch based on provided metadata queries.
 
     Args:
         metadata_query (dict): A dictionary containing metadata fields and their values to be queried.
         query_filter (dict): Optional. A dictionary specifying parameters by which to filter the query.
-        index (str): The index to query data from. Defaults to ELASTIC_QUERY_INDEX from configs variables.
+        index (str): The index to query data from. Defaults to ELK_MERGE_REPORT_INDEX from configs variables.
 
     Returns:
         list: A list of dictionaries containing the retrieved content from Elasticsearch.
@@ -76,25 +76,20 @@ def query_data(metadata_query: dict, query_filter: str = None, index: str = ELAS
     return content_list
 
 
-def download_models_from_minio(minio_bucket=OBJECTSTORAGE_BUCKET, minio_folder=OBJECTSTORAGE_FOLDER, minio_file_list: list = None):
+def download_models_from_minio(minio_bucket=MERGED_MODEL_BUCKET, minio_folder: list = None):
 
     content_list = []
-    if minio_file_list:
-        for file in minio_file_list:
-            content = minio_service.download_object(minio_bucket, f'{minio_folder}/{file}')
-            content_list.append(content)
-    else:
-        for reference in minio_folder:
-            content = minio_service.download_object(minio_bucket, reference)
-            content_list.append(content)
+    for reference in minio_folder:
+        content = minio_service.download_object(minio_bucket, reference)
+        content_list.append(content)
 
     return content_list
 
 
 def send_excel_to_minio(excel_file, time_horizon):
-    excel_file.name = f"OPI/results/{time_horizon}/{excel_file.name}"
-    minio_service.upload_object(file_path_or_file_object=excel_file, bucket_name=DATA_EXPORT_BUCKET)
-    logger.info(f"Sent results to Minio -> {DATA_EXPORT_BUCKET}/{excel_file.name}")
+    excel_file.name = f"{REPORT_FOLDER}/{time_horizon}/{excel_file.name}"
+    minio_service.upload_object(file_path_or_file_object=excel_file, bucket_name=REPORT_BUCKET)
+    logger.info(f"Sent results to Minio -> {REPORT_BUCKET}/{excel_file.name}")
 
 
 def get_all_minio_objects(bucket, folder):
