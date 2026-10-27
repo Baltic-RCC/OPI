@@ -8,6 +8,7 @@ from functools import cache
 from typing import List
 from opi.common import parse_app_properties
 from opi.outages import query_elk_uap
+from opi.integrations import INPUT_FOLDER
 
 logger = logging.getLogger(__name__)
 
@@ -187,9 +188,9 @@ def get_opi_yr_timestamps(iso_offset: str, timestamps_per_day: list, uap_query_o
 def get_input_dir(time_horizon: str):
 
     mapping_dict = {
-        "WK" : "OPI/inputs/W-1",
-        "MO" : "OPI/inputs/M-1",
-        "YR" : "OPI/inputs/Y-1",
+        "WK" : f"{INPUT_FOLDER}/W-1",
+        "MO" : f"{INPUT_FOLDER}/M-1",
+        "YR" : f"{INPUT_FOLDER}/Y-1",
     }
     return mapping_dict.get(time_horizon)
 

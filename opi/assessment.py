@@ -9,7 +9,7 @@ from io import BytesIO
 from datetime import timezone
 from opi.network import load_network
 from loadflow_engine.security_analysis import SecurityAnalysis
-from config.opi import opi_lf_parameters
+from config.opi import lf_parameters as opi_lf_parameters
 from opi.timeframes import select_yr_models
 from opi.outages import run_outage_crosscheck
 from opi.outages import get_relevant_outages, get_uap_outages
@@ -17,8 +17,8 @@ from opi.network import get_system_balance, get_cross_border_flows, get_tie_line
 import pypowsybl as pp
 import zipfile
 from opi.integrations import (get_all_minio_objects, query_data, download_models_from_minio,
-                              get_lf_settings_manager, minio_service, OPI_MODEL_BUCKET, OPI_MODEL_FOLDER,
-                              ELK_SERVER, ELK_UAP_INDEX, DATA_IMPORT_BUCKET, OPI_MODEL_EXPORT_BUCKET, OPI_MODEL_EXPORT_FOLDER)
+                              get_lf_settings_manager, minio_service, YR_MODEL_BUCKET, YR_MODEL_FOLDER,
+                              ELK_SERVER, ELK_UAP_INDEX, INPUT_BUCKET, INPUT_FOLDER, MODEL_EXPORT_BUCKET, MODEL_EXPORT_FOLDER)
 from opi.timeframes import get_opi_week_number, get_result_opi_year
 from opi.integrations import send_opi_results_to_elk
 from opi.common import log_context
@@ -190,7 +190,7 @@ def get_inertia_ratings(minio_bucket: str, use_local_inputs: bool = True) -> pd.
     if use_local_inputs:
         source = Path(__file__).resolve().parent.parent / "inputs" / "general" / "inertia_ratings.xlsx"
     else:
-        source = BytesIO(minio_service.download_object(minio_bucket, "OPI/inputs/general/inertia_ratings.xlsx"))
+        source = BytesIO(minio_service.download_object(minio_bucket, f"{INPUT_FOLDER}/general/inertia_ratings.xlsx"))
 
     return pd.concat(pd.read_excel(source, sheet_name=None).values(), ignore_index=True)
 
@@ -231,14 +231,14 @@ class RunInputs:
     def load(cls, time_horizon: str, lf_settings_keys: list[str], use_local_inputs: bool, data_import_folder: str,
              run_time_offset: str, uap_query_offset: str, inertia_enabled: bool) -> "RunInputs":
         lf_settings = {key: get_loadflow_settings(key, elk_server=ELK_SERVER) for key in lf_settings_keys}
-        assessed_elements_df, contingencies_df = get_input_data(time_horizon, DATA_IMPORT_BUCKET, data_import_folder,
+        assessed_elements_df, contingencies_df = get_input_data(time_horizon, INPUT_BUCKET, data_import_folder,
                                                                 use_local_inputs=use_local_inputs)
         uap_outages = get_uap_outages(time_horizon=time_horizon, run_time_offset=run_time_offset,
                                       uap_query_offset=uap_query_offset, index=ELK_UAP_INDEX)
         inertia_ratings = None
         if inertia_enabled:
             try:
-                inertia_ratings = get_inertia_ratings(DATA_IMPORT_BUCKET, use_local_inputs=use_local_inputs)
+                inertia_ratings = get_inertia_ratings(INPUT_BUCKET, use_local_inputs=use_local_inputs)
             except Exception as error:
                 logger.error(f"Inertia ratings loading failed, inertia not calculated: {error}")
         return cls(lf_settings, assessed_elements_df, contingencies_df, uap_outages, inertia_ratings)
@@ -297,7 +297,7 @@ class OutagePlanIncompatibilityAssessment:
         self.calculate_opi()
         sa_diverged = self.opi_results is None
         if task.export_models:
-            self.export_model_to_minio(bucket=OPI_MODEL_EXPORT_BUCKET, folder=OPI_MODEL_EXPORT_FOLDER)
+            self.export_model_to_minio(bucket=MODEL_EXPORT_BUCKET, folder=MODEL_EXPORT_FOLDER)
         # After calculate_opi: adds to opi_results, also when security analysis diverged
         if task.inertia_enabled and self.inputs.inertia_ratings is not None:
             try:
@@ -394,7 +394,7 @@ class OutagePlanIncompatibilityAssessment:
 
         # Y-1 fallback: model of the timestamp's season from the MinIO folder
         if self.task.import_minio_models and self.task.time_horizon == 'YR':
-            bucket, folder = OPI_MODEL_BUCKET, f'{OPI_MODEL_FOLDER}/{self.task.opi_year}/'
+            bucket, folder = YR_MODEL_BUCKET, f'{YR_MODEL_FOLDER}/{self.task.opi_year}/'
             matches = select_yr_models(get_all_minio_objects(bucket=bucket, folder=folder), self.task.scenario_timestamp)
             if not matches:
                 raise ValueError(f"Y-1 model for {self.task.scenario_timestamp} not found in {bucket}/{folder}")
@@ -538,7 +538,7 @@ class OutagePlanIncompatibilityAssessment:
         self.model_outages = self.crosschecked_element_df[self.crosschecked_element_df['outage_in_cgm']]
         self.outages_to_reconnect = self.crosschecked_element_df[~self.crosschecked_element_df['outage_in_uap']]
         if not self.task.reconnect_outages:
-            logger.info("RECONNECT_OUTAGES is off, reconnecting only OUTAGE_ENABLE elements")
+            logger.info("RECONNECT_OUTAGES is off, reconnecting only FORCE_IN_SERVICE elements")
             self.outages_to_reconnect = self.outages_to_reconnect.iloc[0:0]
 
         # Update outage lists according to manual inputs

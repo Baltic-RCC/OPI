@@ -20,7 +20,7 @@ def main() -> None:
     parse_app_properties(caller_globals=globals(), path=config.paths.integrations.elastic)
     add_elk_handler(elk_server=ELK_SERVER, elk_api_key=ELK_API_KEY, index='opi-logs')
     # Parsed after the ELK handler is added, so the run config echo reaches opi-logs
-    parse_app_properties(caller_globals=globals(), path=config.paths.task_generator.task)
+    parse_app_properties(caller_globals=globals(), path=config.paths.opi.worker)
 
     # Uncaught errors, e.g. in the run preparation below, are logged (also to opi-logs); exit code stays 1
     sys.excepthook = lambda *exc_info: logger.critical("OPI run failed", exc_info=exc_info)
@@ -29,17 +29,17 @@ def main() -> None:
     logger.info(f"OPI region: {MERGE_TYPE} models, assessed areas {ASSESSED_AREAS}, external areas {EXTERNAL_AREAS}")
 
     uap_offset_time = get_uap_offset_time(time_offset=UAP_QUERY_OFFSET, time_horizon=TIME_HORIZON)
-    timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
-                                    time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS,
+    timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=CALCULATION_TIMES.split(","),
+                                    time_horizon=TIME_HORIZON, set_timestamps=SET_CALCULATION_DATES,
                                     uap_query_offset=uap_offset_time)
     if not timestamps:
         logger.error(f"No OPI timestamps generated (TIME_HORIZON={TIME_HORIZON}, "
-                     f"SET_CRITICAL_TIMESTAMPS={SET_CRITICAL_TIMESTAMPS!r}), exiting worker")
+                     f"SET_CALCULATION_DATES={SET_CALCULATION_DATES!r}), exiting worker")
         sys.exit(1)
 
     opi_year = get_opi_year(timestamps)
     task_version = set_task_version(timestamps=timestamps, time_horizon=TIME_HORIZON, set_version=TASK_VERSION)
-    outage_corrections = set_outage_corrections(OUTAGE_ENABLE, OUTAGE_DISABLE)
+    outage_corrections = set_outage_corrections(FORCE_IN_SERVICE, FORCE_OUTAGE)
 
     tasks = [OpiTask(time_horizon=TIME_HORIZON,
                      scenario_timestamp=timestamp.isoformat(),

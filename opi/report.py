@@ -153,12 +153,12 @@ ignore_columns3 = {'subject_id', 'contingency_id', '@run_id', 'limit_reduction',
 
 def main() -> None:
     setup_logging()
-    parse_app_properties(caller_globals=globals(), path=config.paths.opi.report_generator)
+    parse_app_properties(caller_globals=globals(), path=config.paths.opi.report)
 
     time_horizon = TIME_HORIZON
-    if SET_CRITICAL_TIMESTAMPS:
-        timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=HOURS_PER_TIMESTAMP.split(","),
-                                        time_horizon=TIME_HORIZON, set_timestamps=SET_CRITICAL_TIMESTAMPS)
+    if SET_CALCULATION_DATES:
+        timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=CALCULATION_TIMES.split(","),
+                                        time_horizon=TIME_HORIZON, set_timestamps=SET_CALCULATION_DATES)
     else:
         # Timestamps with results in the assessed period, not recalculated (Y-1 ones depend on the UAP at run time)
         period_start, period_end = get_opi_period(iso_offset=DATE_OFFSET, time_horizon=TIME_HORIZON)
