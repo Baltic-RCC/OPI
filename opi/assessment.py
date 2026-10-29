@@ -715,9 +715,14 @@ class OutagePlanIncompatibilityAssessment:
                         profile_zip.writestr(new_name.replace(".zip", ".xml"), exported.read(name))
                     model_zip.writestr(new_name, profile_buffer.getvalue())
             model_buffer.seek(0)
-            # OPI_<model_name>_<uuid>.zip
+            # OPI_ + source model name with the result version and a new uuid:
+            # RMM_WK_008_20261031T0930Z_BA_<uuid> -> OPI_RMM_WK_<result version>_20261031T0930Z_BA_<uuid>
             model_name = re.sub(r"_[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", "",
                                 self.model_meta['name'].removesuffix('.zip'))
+            model_name, replaced = re.subn(r"^([^_]+_[^_]+_)\d+_", rf"\g<1>{self.task.task_version:03d}_",
+                                           model_name)
+            if not replaced:
+                logger.warning(f"No version field in model name {model_name}, exported with the source version")
             model_buffer.name = f"{folder}/{self.task.time_horizon}/OPI_{model_name}_{uuid.uuid4()}.zip"
             minio_service.upload_object(file_path_or_file_object=model_buffer, bucket_name=bucket)
             logger.info(f"OPI model saved to MinIO: {bucket}/{model_buffer.name}")
