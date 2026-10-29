@@ -28,8 +28,8 @@ def main() -> None:
     # region.properties is parsed at import, before logging is set up
     logger.info(f"OPI region: {MERGE_TYPE} models, assessed areas {ASSESSED_AREAS}, external areas {EXTERNAL_AREAS}")
 
-    uap_offset_time = get_uap_offset_time(time_offset=UAP_QUERY_OFFSET, time_horizon=TIME_HORIZON)
-    timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=CALCULATION_TIMES.split(","),
+    uap_offset_time = get_uap_offset_time(time_offset=UAP_SEARCH_WINDOW, time_horizon=TIME_HORIZON)
+    timestamps = get_opi_timestamps(iso_offset=RUN_TIME_OFFSET, timestamps_per_day=CALCULATION_TIMES.split(","),
                                     time_horizon=TIME_HORIZON, set_timestamps=SET_CALCULATION_DATES,
                                     uap_query_offset=uap_offset_time)
     if not timestamps:
@@ -38,7 +38,7 @@ def main() -> None:
         sys.exit(1)
 
     opi_year = get_opi_year(timestamps)
-    task_version = set_task_version(timestamps=timestamps, time_horizon=TIME_HORIZON, set_version=TASK_VERSION)
+    task_version = set_task_version(timestamps=timestamps, time_horizon=TIME_HORIZON, set_version=RESULT_VERSION)
     outage_corrections = set_outage_corrections(FORCE_IN_SERVICE, FORCE_OUTAGE)
 
     tasks = [OpiTask(time_horizon=TIME_HORIZON,
@@ -48,9 +48,9 @@ def main() -> None:
                      model_version=MODEL_VERSION,
                      validate_models=json.loads(VALIDATE_MODELS.lower()),
                      send_to_elk=json.loads(SEND_TO_ELK.lower()),
-                     import_minio_models=json.loads(IMPORT_MINIO_MODELS.lower()),
-                     reconnect_outages=json.loads(RECONNECT_OUTAGES.lower()),
-                     export_models=json.loads(EXPORT_MODELS.lower()),
+                     import_minio_models=json.loads(USE_MINIO_YR_MODELS.lower()),
+                     reconnect_outages=json.loads(RECONNECT_NON_UAP_OUTAGES.lower()),
+                     export_models=json.loads(EXPORT_MODELS_TO_MINIO.lower()),
                      inertia_enabled=json.loads(CALCULATE_INERTIA.lower()),
                      outage_corrections=outage_corrections)
              for timestamp in timestamps]
@@ -58,12 +58,12 @@ def main() -> None:
     logger.info(f"OPI run: {TIME_HORIZON}, version {task_version}, {len(tasks)} timestamp(s): "
                 f"{[task.scenario_timestamp for task in tasks]}")
     # LF settings, input lists and the UAP batch are the same for every timestamp of the run
-    lf_settings_keys = get_loadflow_settings_keys(SET_LF_PARAMETERS, LF_SETTINGS_PRIORITY,
+    lf_settings_keys = get_loadflow_settings_keys(SET_LF_SETTINGS, LF_SETTINGS_PRIORITY,
                                                   dynamic=json.loads(ENABLE_DYNAMIC_LF_SETTINGS.lower()))
     inputs = RunInputs.load(time_horizon=TIME_HORIZON, lf_settings_keys=lf_settings_keys,
-                            use_local_inputs=json.loads(USE_DEFAULT_INPUTS.lower()),
+                            use_local_inputs=json.loads(USE_LOCAL_INPUT_LISTS.lower()),
                             data_import_folder=get_input_dir(time_horizon=TIME_HORIZON),
-                            run_time_offset=DATE_OFFSET, uap_query_offset=uap_offset_time,
+                            run_time_offset=RUN_TIME_OFFSET, uap_query_offset=uap_offset_time,
                             inertia_enabled=json.loads(CALCULATE_INERTIA.lower()))
     failed = []
     for number, task in enumerate(tasks, start=1):
