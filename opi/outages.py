@@ -182,7 +182,7 @@ def get_outage_grid_id(relevant_outages_df: pd.DataFrame, element_df: pd.DataFra
         merged_df = merged_df.replace(("None", "none", "nan", "NaN", ""), pd.NA)
         missing_outages_df = merged_df[(merged_df['_merge'] == 'left_only') & (merged_df["mrid"].isna())]
         if not missing_outages_df.empty:
-             for _, row in missing_outages_df[['name']].iterrows():
+             for _, row in missing_outages_df[['name']].drop_duplicates().iterrows():
                  logger.error(f"Failed to get outage mRID: {row.values.tolist()}")
         else:
              logger.info("All relevant outages mapped to grid id's")
@@ -213,7 +213,7 @@ def get_known_network_elements(network: pp.network, ids: List[str]) -> pd.DataFr
     try:
         return get_network_elements_by_ids(network, ids)
     except Exception as error:
-        logger.warning(f"Network element lookup failed ({error}), looking up ids one by one")
+        logger.debug(f"Network element lookup failed ({error}), looking up ids one by one")
 
     found, missing = [], []
     for element_id in ids:
