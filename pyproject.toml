@@ -23,8 +23,8 @@ url = "https://pypi.org/simple"
 
 [[tool.uv.index]]
 name = "rcc-pypi"
-url = "https://artifactory.elering.sise/artifactory/api/pypi/pssepip/simple"
-#default = true
+url = "https://artifactory.elering.sise/artifactory/api/pypi/rcc-pypi/simple"
+default = true
 
 [tool.uv.workspace]
 members = ["brcc-apis"]
