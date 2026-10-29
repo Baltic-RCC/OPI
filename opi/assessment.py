@@ -13,7 +13,7 @@ from config.opi import lf_parameters as opi_lf_parameters
 from opi.timeframes import select_yr_models
 from opi.outages import run_outage_crosscheck
 from opi.outages import get_relevant_outages, get_uap_outages
-from opi.network import get_system_balance, get_cross_border_flows, get_tie_line_halves
+from opi.network import get_system_balance, get_cross_border_flows, get_tie_line_halves, get_violation_areas
 import pypowsybl as pp
 import zipfile
 from opi.integrations import (get_all_minio_objects, query_data, download_models_from_minio,
@@ -261,6 +261,7 @@ class OutagePlanIncompatibilityAssessment:
         self.areas: List[str] = []
         self.model_is_valid = None
         self.base_case_violations = None
+        self.pre_outage_violations = pd.DataFrame()
         self.outage_configuration_id = None
         self.outage_lf_status = None
         self.crosschecked_element_df = None
@@ -518,6 +519,14 @@ class OutagePlanIncompatibilityAssessment:
         if not self.base_case_violations.empty:
             logger.warning(f"{len(self.base_case_violations)} base case CURRENT violation(s) before UAP outages in "
                            f"{self.model_meta['name']}: {self.base_case_violations['subject_id'].unique().tolist()}")
+            # Also published on their own (opi-pre-outage-violations), without the external areas
+            try:
+                pre_outage = self.base_case_violations.drop(columns=['contingency_id'], errors='ignore').assign(
+                    area=get_violation_areas(self.security_service.network, self.base_case_violations),
+                    value_percent=self.base_case_violations['value'] / self.base_case_violations['limit'] * 100)
+                self.pre_outage_violations = pre_outage[~pre_outage['area'].isin(EXTERNAL_AREAS)].reset_index(drop=True)
+            except Exception as error:
+                logger.error(f"Pre-outage violations not published: {error!r}")
         self.model_is_valid = True
         end_time = datetime.now(timezone.utc)
         logger.info(f"Validation took {(end_time - start_time).total_seconds()} s")
@@ -679,6 +688,7 @@ class OutagePlanIncompatibilityAssessment:
                                 "system-balance": system_balance,
                                 "branch-results": opi_result_branch,
                                 "violations": opi_result_violations,
+                                "pre-outage-violations": self.pre_outage_violations,
                                 "diverged-contingencies": opi_result_diverged_contingencies
                                 }
         self.security_service.network.set_working_variant('InitialState')
