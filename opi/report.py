@@ -4,7 +4,7 @@ from opi.timeframes import get_opi_timestamps, get_opi_year, get_opi_period
 from opi.common import parse_app_properties
 from opi.integrations import set_task_version
 from opi.common import setup_logging
-from opi.region import EXTERNAL_AREAS, LINE_LOADING_LIMIT, TRANSFORMER_LOADING_LIMIT
+from opi.region import EXTERNAL_AREAS, LINE_REPORT_THRESHOLD, TRANSFORMER_REPORT_THRESHOLD
 import config
 import pandas as pd
 import logging
@@ -157,11 +157,11 @@ def main() -> None:
 
     time_horizon = TIME_HORIZON
     if SET_CALCULATION_DATES:
-        timestamps = get_opi_timestamps(iso_offset=DATE_OFFSET, timestamps_per_day=CALCULATION_TIMES.split(","),
+        timestamps = get_opi_timestamps(iso_offset=RUN_TIME_OFFSET, timestamps_per_day=CALCULATION_TIMES.split(","),
                                         time_horizon=TIME_HORIZON, set_timestamps=SET_CALCULATION_DATES)
     else:
         # Timestamps with results in the assessed period, not recalculated (Y-1 ones depend on the UAP at run time)
-        period_start, period_end = get_opi_period(iso_offset=DATE_OFFSET, time_horizon=TIME_HORIZON)
+        period_start, period_end = get_opi_period(iso_offset=RUN_TIME_OFFSET, time_horizon=TIME_HORIZON)
         query = {"bool": {"filter": [
             {"match": {"@time_horizon": time_horizon}},
             {"range": {"@scenario_timestamp": {"gte": f"{period_start:%Y-%m-%d}T00:00:00",
@@ -209,7 +209,7 @@ def main() -> None:
                 logger.warning(f"No results for {timestamp} ({time_horizon}, version {version}), not in report")
                 break
             if index == 'system-balance' and '@run_id' in elk_df.columns:
-                # Report one run: a version can hold several (version reused after a failed send, TASK_VERSION set by hand)
+                # Report one run: a version can hold several (version reused after a failed send, RESULT_VERSION set by hand)
                 runs = elk_df.sort_values('@timestamp', kind='stable') if '@timestamp' in elk_df.columns else elk_df
                 run_id = runs['@run_id'].iloc[-1]
                 if elk_df['@run_id'].nunique() > 1:
@@ -233,14 +233,14 @@ def main() -> None:
                     elk_df = elk_df[
                         (
                                 (elk_df['subject_type'] == "LINE") &
-                                (elk_df['value_percent'] >= LINE_LOADING_LIMIT)
+                                (elk_df['value_percent'] >= LINE_REPORT_THRESHOLD)
                         ) |
                         (
                                 (
                                         (elk_df['subject_type'] == "TWO_WINDINGS_TRANSFORMER") |
                                         (elk_df['subject_type'] == "THREE_WINDINGS_TRANSFORMER")
                                 ) &
-                                (elk_df['value_percent'] >= TRANSFORMER_LOADING_LIMIT)
+                                (elk_df['value_percent'] >= TRANSFORMER_REPORT_THRESHOLD)
                         )]
 
             if index == "branch-results":

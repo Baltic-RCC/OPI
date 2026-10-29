@@ -216,8 +216,8 @@ def get_opi_year(timestamps: list):
     return opi_year
 
 def get_opi_yr_year(iso_offset: str) -> int:
-    """Y-1 target year: OPI_YEAR when set, otherwise the year after the run time (now + DATE_OFFSET)."""
-    opi_year = get_yr_config()['OPI_YEAR']
+    """Y-1 target year: YR_TARGET_YEAR when set, otherwise the year after the run time (now + RUN_TIME_OFFSET)."""
+    opi_year = get_yr_config()['YR_TARGET_YEAR']
     if str(opi_year).strip():
         return int(opi_year)
     return (datetime.now() + isodate.parse_duration(iso_offset)).year + 1

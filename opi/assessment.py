@@ -538,7 +538,7 @@ class OutagePlanIncompatibilityAssessment:
         self.model_outages = self.crosschecked_element_df[self.crosschecked_element_df['outage_in_cgm']]
         self.outages_to_reconnect = self.crosschecked_element_df[~self.crosschecked_element_df['outage_in_uap']]
         if not self.task.reconnect_outages:
-            logger.info("RECONNECT_OUTAGES is off, reconnecting only FORCE_IN_SERVICE elements")
+            logger.info("RECONNECT_NON_UAP_OUTAGES is off, reconnecting only FORCE_IN_SERVICE elements")
             self.outages_to_reconnect = self.outages_to_reconnect.iloc[0:0]
 
         # Update outage lists according to manual inputs
