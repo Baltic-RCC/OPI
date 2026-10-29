@@ -232,3 +232,25 @@ def get_tie_line_halves(network: pp.network.Network) -> dict[str, list[str]]:
     halves = {tie_line_id: group.index.tolist() for tie_line_id, group in paired.groupby('tie_line_id')}
 
     return {**halves, **{line_id: halves[tie_line_id] for line_id, tie_line_id in paired['tie_line_id'].items()}}
+
+
+def get_violation_areas(network: pp.network.Network, violations: pd.DataFrame) -> pd.Series:
+    """Area of each limit violation: CGMES region of the substation on the violated side, NaN when not found."""
+    boundary_lines = network.get_boundary_lines()['voltage_level_id']
+    tie_lines = network.get_tie_lines()
+    voltage_levels = pd.concat([
+        network.get_lines()[['voltage_level1_id', 'voltage_level2_id']],
+        network.get_2_windings_transformers()[['voltage_level1_id', 'voltage_level2_id']],
+        network.get_3_windings_transformers()[['voltage_level1_id', 'voltage_level2_id', 'voltage_level3_id']],
+        boundary_lines.to_frame('voltage_level1_id'),
+        pd.DataFrame({'voltage_level1_id': tie_lines['dangling_line1_id'].map(boundary_lines),
+                      'voltage_level2_id': tie_lines['dangling_line2_id'].map(boundary_lines)}),
+    ])
+    substations = network.get_voltage_levels()['substation_id']
+    regions = network.get_substations(all_attributes=True)['CGMES.regionName'].replace(AREA_ALIASES)
+    # Side ONE/TWO/THREE of the violation; boundary lines have one side
+    sides = violations['side'].map({'ONE': 1, 'TWO': 2, 'THREE': 3}).fillna(1).astype(int)
+    voltage_level = [voltage_levels.at[subject, f'voltage_level{side}_id'] if subject in voltage_levels.index else None
+                     for subject, side in zip(violations['subject_id'], sides)]
+
+    return pd.Series(voltage_level, index=violations.index).map(substations).map(regions)
