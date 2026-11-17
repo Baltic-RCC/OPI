@@ -56,12 +56,14 @@ def opi_results_to_excel(results: tuple, time_horizon: str = '', year='', export
         if f"{timestamp} Violations" not in workbook.sheetnames:
             # logger.info(f"Creating violation sheet for {timestamp}")
             workbook.create_sheet(title=f"{timestamp} Violations")
+        lf_key = timestamp_results[0]['loadflow_settings'].iloc[0] if 'loadflow_settings' in timestamp_results[0] else ''
+        workbook[f"{timestamp} Base Case Data"].cell(row=1, column=1, value=f"LF settings: {lf_key}")
 
         # Add the data to the sheets
         for i, data in enumerate(timestamp_results):
             # TODO find better solution
             drop_list = ['@scenario_timestamp', '@time_horizon', '@version', '@run_id', 'opi_year', 'opi_week',
-                         'week_day', 'opi_month']
+                         'week_day', 'opi_month', 'loadflow_settings']
             for column_name in drop_list:
                 data.drop(column_name, axis=1, inplace=True, errors='ignore')
 
