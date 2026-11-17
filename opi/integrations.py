@@ -9,6 +9,7 @@ from brcc_apis import settings_manager
 logger = logging.getLogger(__name__)
 parse_app_properties(caller_globals=globals(), path=config.paths.integrations.elastic)
 parse_app_properties(caller_globals=globals(), path=config.paths.integrations.minio)
+parse_app_properties(caller_globals=globals(), path=config.paths.integrations.rabbit)
 
 
 minio_service = ObjectStorage(server=OBJECTSTORAGE_URL, username=OBJECTSTORAGE_USERNAME, password=OBJECTSTORAGE_PASSWORD)
@@ -145,6 +146,25 @@ def send_opi_results_to_elk(results: dict, time_horizon: str, timestamp: str):
         logger.info("Results successfully sent to Elastic")
 
     return response_list
+
+
+def send_to_rabbit(payload: bytes, exchange: str, headers: dict) -> bool:
+    """Publishes one message to a RabbitMQ exchange; a failure is logged and returns False."""
+    from brcc_apis import rabbit
+
+    client = None
+    try:
+        client = rabbit.BlockingClient(host=RMQ_SERVER, port=int(RMQ_PORT), username=RMQ_USERNAME,
+                                       password=RMQ_PASSWORD)
+        client.publish(payload=payload, exchange_name=exchange, headers=headers)
+        logger.info(f"Message published to RabbitMQ exchange: {exchange}")
+        return True
+    except Exception as error:
+        logger.error(f"Publishing to RabbitMQ exchange {exchange} failed: {error}")
+        return False
+    finally:
+        if client:
+            client.close()
 
 
 def set_task_version(timestamps, time_horizon: str, set_version: str = None):
