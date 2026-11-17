@@ -91,6 +91,7 @@ def opi_results_to_excel(results: tuple, time_horizon: str = '', year='', export
                     for i, row in data.iterrows():
                         for j, col in enumerate(columns):
                             worksheet.cell(row = START_ROW + i, column=START_COLUMN+j, value=row[col])
+                    worksheet.cell(row=worksheet.max_row+2, column=1, value="")
 
                 elif df_names[i] == "branch-results":
                     set_headers(worksheet, row=10, col=10, val=df_names[i])
