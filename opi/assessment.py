@@ -20,7 +20,7 @@ from opi.integrations import (get_all_minio_objects, query_data, download_models
                               get_lf_settings_manager, minio_service, YR_MODEL_BUCKET, YR_MODEL_FOLDER,
                               ELK_SERVER, ELK_UAP_INDEX, INPUT_BUCKET, INPUT_FOLDER, MODEL_EXPORT_BUCKET, MODEL_EXPORT_FOLDER)
 from opi.timeframes import get_opi_week_number, get_result_opi_year
-from opi.integrations import send_opi_results_to_elk
+from opi.integrations import send_opi_results_to_elk, send_to_rabbit, SAR_BUCKET, SAR_FOLDER, RMQ_EXCHANGE_SAR
 from opi.common import log_context
 from opi.region import (MERGE_TYPE, ASSESSED_AREAS, EXTERNAL_AREAS, AREA_TSO_NAMES, EXPORT_NAME_REPLACE,
                         normalize_area)
@@ -209,6 +209,10 @@ class OpiTask:
     reconnect_outages: bool
     export_models: bool
     inertia_enabled: bool
+    sar_to_rmq: bool
+    sar_to_storage: bool
+    sar_voltage_violations: bool
+    sar_loading_limit: float
     outage_corrections: dict
 
     @property
@@ -268,6 +272,7 @@ class OutagePlanIncompatibilityAssessment:
         self.model_outages = None
         self.outages_to_reconnect = None
         self.opi_results = None
+        self.run_id = None
 
     def run(self) -> None:
         """Runs the timestamp; raises when it failed, after the export and results it could still produce."""
@@ -312,6 +317,12 @@ class OutagePlanIncompatibilityAssessment:
                     raise RuntimeError(f"Sending results to ELK failed, timestamp {task.scenario_timestamp}")
 
             if not sa_diverged:
+                if task.sar_to_rmq or task.sar_to_storage:
+                    # A failed SAR profile is only logged, the timestamp still succeeds
+                    try:
+                        self.provide_sar()
+                    except Exception as error:
+                        logger.exception(f"SAR profile failed: {error!r}")
                 logger.info(f"{task.scenario_timestamp} OPI calculation finished")
 
         if self.model_is_valid is False:
@@ -731,19 +742,76 @@ class OutagePlanIncompatibilityAssessment:
         finally:
             network.set_working_variant('InitialState')
 
+    def provide_sar(self) -> None:
+        """SecurityAnalysisResult (NC) profile of the N-1 violations to RabbitMQ and/or MinIO; nothing without violations."""
+        from nc_data_exchange import profile_constructor
+        import triplets
+
+        task = self.task
+        branch_results = self.security_service.get_processed_branch_results_rcp(only_violations=True,
+                                                                                only_one_terminal=True,
+                                                                                subject_id_instead_terminal=True)
+        # value = loading in % of the limit
+        branch_results = [result for result in branch_results if result.value > task.sar_loading_limit]
+        bus_results = []
+        if task.sar_voltage_violations:
+            bus_results = self.security_service.get_processed_bus_results_rcp(only_violations=True,
+                                                                              subject_id_instead_terminal=True)
+        if not branch_results and not bus_results:
+            logger.info("No violations, SAR profile not provided")
+            return
+
+        # CGMES ids of the violated current limits, matched by terminal and limit value
+        model_buffer = BytesIO(self.model_data)
+        model_buffer.name = "model.zip"
+        data = triplets.rdf_parser.load_all_to_dataframe([model_buffer])
+        current_limits = data.type_tableview('CurrentLimit').reset_index().rename(columns={"ID": "CurrentLimit"})
+        limits = data.type_tableview('OperationalLimitSet').merge(current_limits, left_on='ID',
+                                                                  right_on='OperationalLimit.OperationalLimitSet')
+
+        scenario_time = f"{task.timestamp.isoformat(timespec='seconds')}Z"
+        profile = profile_constructor.Profile(profile_name='SecurityAnalysisResult')
+        profile.add_document_header(scenarioTime=scenario_time, publisher="38X-BALTIC-RSC-H",
+                                    version=str(task.task_version),
+                                    wasGeneratedBy=f"OPI-{task.time_horizon}-{self.run_id}-SAR")
+        for power_flow_result in branch_results:
+            terminal_limits = limits[limits['OperationalLimitSet.Terminal'] == power_flow_result.ACDCTerminal]
+            relevant_limit = terminal_limits[round(terminal_limits['CurrentLimit.value'])
+                                             == round(power_flow_result.OperationalLimitValue)]
+            power_flow_result.OperationalLimit = None if relevant_limit.empty else relevant_limit['CurrentLimit'].iloc[0]
+            power_flow_result.atTime = scenario_time
+            profile.add_element(element=power_flow_result)
+        for power_flow_result in bus_results:
+            power_flow_result.atTime = scenario_time
+            profile.add_element(element=power_flow_result)
+        sar = profile.get_profile_xml(fix_rdf_about=True, remove_rdf_datatype=True)
+        logger.info(f"SAR profile built: {len(branch_results)} branch and {len(bus_results)} bus violations")
+
+        if task.sar_to_rmq:
+            headers = {"message-type": "SAR", "message-id": str(uuid.uuid4()),
+                       "sent-at": datetime.now(timezone.utc).isoformat(), "source-module": "opi",
+                       "time-horizon": task.time_horizon, "scenario-time": scenario_time,
+                       "version": task.task_version, "run-id": self.run_id}
+            send_to_rabbit(payload=sar, exchange=RMQ_EXCHANGE_SAR, headers=headers)
+        if task.sar_to_storage:
+            sar_buffer = BytesIO(sar)
+            sar_buffer.name = (f"{SAR_FOLDER}/{task.time_horizon}/{task.timestamp:%Y%m%d}/SAR_{task.timestamp:%Y%m%dT%H%M}Z_"
+                               f"{task.time_horizon}_{task.task_version}_{uuid.uuid4()}.xml")
+            minio_service.upload_object(file_path_or_file_object=sar_buffer, bucket_name=SAR_BUCKET)
+            logger.info(f"SAR profile saved to MinIO: {SAR_BUCKET}/{sar_buffer.name}")
 
     def update_result_metadata(self):
 
         logger.info("Parsing finalized results")
 
-        run_id = str(uuid.uuid4())
+        self.run_id = str(uuid.uuid4())
         timestamp = self.task.timestamp
         result_list = []
         for name, result_df in self.opi_results.items():
             if not result_df.empty:
                 result_df['@scenario_timestamp'] = self.task.scenario_timestamp
                 result_df['@time_horizon'] = self.task.time_horizon
-                result_df['@run_id'] = run_id
+                result_df['@run_id'] = self.run_id
                 result_df['@version'] = self.task.task_version
                 result_df['loadflow_settings'] = self.lf_settings_key
                 result_df['week_day'] = timestamp.weekday()
