@@ -52,6 +52,10 @@ def main() -> None:
                      reconnect_outages=json.loads(RECONNECT_NON_UAP_OUTAGES.lower()),
                      export_models=json.loads(EXPORT_MODELS_TO_MINIO.lower()),
                      inertia_enabled=json.loads(CALCULATE_INERTIA.lower()),
+                     sar_to_rmq=json.loads(SAR_TO_RMQ.lower()),
+                     sar_to_storage=json.loads(SAR_PROFILE_TO_STORAGE.lower()),
+                     sar_voltage_violations=json.loads(SAR_INCLUDE_VOLTAGE_VIOLATIONS.lower()),
+                     sar_loading_limit=float(SAR_LOADING_LIMIT),
                      outage_corrections=outage_corrections)
              for timestamp in timestamps]
 
