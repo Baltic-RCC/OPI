@@ -743,49 +743,53 @@ class OutagePlanIncompatibilityAssessment:
             network.set_working_variant('InitialState')
 
     def provide_sar(self) -> None:
-        """SecurityAnalysisResult (NC) profile of the N-1 violations to RabbitMQ and/or MinIO; nothing without violations."""
+        """SecurityAnalysisResult (NC) profile of the violations sent to opi-violations, to RabbitMQ and/or MinIO;
+        nothing without violations."""
         from nc_data_exchange import profile_constructor
-        import triplets
+        from nc_data_exchange.profiles.SecurityAnalysisResult import BaseCasePowerFlowResult, ContingencyPowerFlowResult
 
         task = self.task
-        branch_results = self.security_service.get_processed_branch_results_rcp(only_violations=True,
-                                                                                only_one_terminal=True,
-                                                                                subject_id_instead_terminal=True)
-        # value = loading in % of the limit
-        branch_results = [result for result in branch_results if result.value > task.sar_loading_limit]
-        bus_results = []
+        scenario_time = f"{task.timestamp.isoformat(timespec='seconds')}Z"
+        violations = self.opi_results['violations']
+        if not violations.empty:
+            violations = violations[violations['value_percent'] > task.sar_loading_limit]
+        # A tie line id is not an mRID: its violation goes to the half on the violated side
+        tie_lines = self.security_service.network.get_tie_lines()
+        results = []
+        for violation in violations.to_dict('records'):
+            subject_id = violation['subject_id']
+            if subject_id in tie_lines.index:
+                subject_id = tie_lines.at[subject_id, 'boundary_line2_id' if violation['side'] == 'TWO'
+                                          else 'boundary_line1_id']
+            contingency_id = violation['contingency_id'] if pd.notna(violation['contingency_id']) else ''
+            result = {"atTime": scenario_time, "isViolation": True, "value": violation['value_percent'],
+                      "valueA": violation['value'], "OperationalLimitValue": violation['limit'],
+                      "ACDCTerminal": subject_id.removeprefix('_'), "EquipmentName": violation.get('subject_name'),
+                      "Substation": violation.get('substation_name')}
+            try:
+                if contingency_id:
+                    results.append(ContingencyPowerFlowResult(**result, Contingency=contingency_id.removeprefix('_')))
+                else:
+                    results.append(BaseCasePowerFlowResult(**result))
+            except ValueError as error:
+                logger.warning(f"Violation of {violation['subject_id']} (contingency {contingency_id!r}) "
+                               f"left out of the SAR profile: {error}")
         if task.sar_voltage_violations:
-            bus_results = self.security_service.get_processed_bus_results_rcp(only_violations=True,
-                                                                              subject_id_instead_terminal=True)
-        if not branch_results and not bus_results:
+            results += self.security_service.get_processed_bus_results_rcp(only_violations=True,
+                                                                            subject_id_instead_terminal=True)
+        if not results:
             logger.info("No violations, SAR profile not provided")
             return
 
-        # CGMES ids of the violated current limits, matched by terminal and limit value
-        model_buffer = BytesIO(self.model_data)
-        model_buffer.name = "model.zip"
-        data = triplets.rdf_parser.load_all_to_dataframe([model_buffer])
-        current_limits = data.type_tableview('CurrentLimit').reset_index().rename(columns={"ID": "CurrentLimit"})
-        limits = data.type_tableview('OperationalLimitSet').merge(current_limits, left_on='ID',
-                                                                  right_on='OperationalLimit.OperationalLimitSet')
-
-        scenario_time = f"{task.timestamp.isoformat(timespec='seconds')}Z"
         profile = profile_constructor.Profile(profile_name='SecurityAnalysisResult')
         profile.add_document_header(scenarioTime=scenario_time, publisher="38X-BALTIC-RSC-H",
                                     version=str(task.task_version),
                                     wasGeneratedBy=f"OPI-{task.time_horizon}-{self.run_id}-SAR")
-        for power_flow_result in branch_results:
-            terminal_limits = limits[limits['OperationalLimitSet.Terminal'] == power_flow_result.ACDCTerminal]
-            relevant_limit = terminal_limits[round(terminal_limits['CurrentLimit.value'])
-                                             == round(power_flow_result.OperationalLimitValue)]
-            power_flow_result.OperationalLimit = None if relevant_limit.empty else relevant_limit['CurrentLimit'].iloc[0]
-            power_flow_result.atTime = scenario_time
-            profile.add_element(element=power_flow_result)
-        for power_flow_result in bus_results:
-            power_flow_result.atTime = scenario_time
-            profile.add_element(element=power_flow_result)
+        for result in results:
+            result.atTime = scenario_time
+            profile.add_element(element=result)
         sar = profile.get_profile_xml(fix_rdf_about=True, remove_rdf_datatype=True)
-        logger.info(f"SAR profile built: {len(branch_results)} branch and {len(bus_results)} bus violations")
+        logger.info(f"SAR profile built: {len(results)} violations")
 
         if task.sar_to_rmq:
             headers = {"message-type": "SAR", "message-id": str(uuid.uuid4()),
