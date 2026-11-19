@@ -795,7 +795,8 @@ class OutagePlanIncompatibilityAssessment:
             headers = {"message-type": "SAR", "message-id": str(uuid.uuid4()),
                        "sent-at": datetime.now(timezone.utc).isoformat(), "source-module": "opi",
                        "time-horizon": task.time_horizon, "scenario-time": scenario_time,
-                       "version": task.task_version, "run-id": self.run_id}
+                       "version": task.task_version, "run-id": self.run_id,
+                       "content-reference": self.model_meta.get('content_reference', self.model_meta.get('object_name'))}
             send_to_rabbit(payload=sar, exchange=RMQ_EXCHANGE_SAR, headers=headers)
         if task.sar_to_storage:
             sar_buffer = BytesIO(sar)
