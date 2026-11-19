@@ -273,6 +273,7 @@ class OutagePlanIncompatibilityAssessment:
         self.outages_to_reconnect = None
         self.opi_results = None
         self.run_id = None
+        self.exported_model_reference = None
 
     def run(self) -> None:
         """Runs the timestamp; raises when it failed, after the export and results it could still produce."""
@@ -736,6 +737,7 @@ class OutagePlanIncompatibilityAssessment:
                 logger.warning(f"No version field in model name {model_name}, exported with the source version")
             model_buffer.name = f"{folder}/{self.task.time_horizon}/OPI_{model_name}_{uuid.uuid4()}.zip"
             minio_service.upload_object(file_path_or_file_object=model_buffer, bucket_name=bucket)
+            self.exported_model_reference = model_buffer.name
             logger.info(f"OPI model saved to MinIO: {bucket}/{model_buffer.name}")
         except Exception as error:
             logger.exception(f"OPI model export to MinIO failed: {error!r}")
@@ -791,12 +793,15 @@ class OutagePlanIncompatibilityAssessment:
         sar = profile.get_profile_xml(fix_rdf_about=True, remove_rdf_datatype=True)
         logger.info(f"SAR profile built: {len(results)} violations")
 
-        if task.sar_to_rmq:
+        if task.sar_to_rmq and not self.exported_model_reference:
+            logger.error("SAR profile not sent to RabbitMQ: no exported OPI model to reference "
+                         "(EXPORT_MODELS_TO_MINIO off or the export failed)")
+        elif task.sar_to_rmq:
             headers = {"message-type": "SAR", "message-id": str(uuid.uuid4()),
                        "sent-at": datetime.now(timezone.utc).isoformat(), "source-module": "opi",
                        "time-horizon": task.time_horizon, "scenario-time": scenario_time,
                        "version": task.task_version, "run-id": self.run_id,
-                       "content-reference": self.model_meta.get('content_reference', self.model_meta.get('object_name'))}
+                       "content-reference": self.exported_model_reference}
             send_to_rabbit(payload=sar, exchange=RMQ_EXCHANGE_SAR, headers=headers)
         if task.sar_to_storage:
             sar_buffer = BytesIO(sar)
