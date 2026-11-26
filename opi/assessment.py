@@ -801,7 +801,8 @@ class OutagePlanIncompatibilityAssessment:
                        "sent-at": datetime.now(timezone.utc).isoformat(), "source-module": "opi",
                        "time-horizon": task.time_horizon, "scenario-time": scenario_time,
                        "version": task.task_version, "run-id": self.run_id,
-                       "content-reference": self.exported_model_reference}
+                       "content-reference": self.exported_model_reference,
+                       "loadflow-settings": self.lf_settings_key}
             send_to_rabbit(payload=sar, exchange=RMQ_EXCHANGE_SAR, headers=headers)
         if task.sar_to_storage:
             sar_buffer = BytesIO(sar)
